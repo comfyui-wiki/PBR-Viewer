@@ -34,7 +34,7 @@ function App() {
     lockCamera: false,
     doubleSided: false,
     modelRotation: { x: 0, y: 0, z: 0 },
-    textureRepeat: { u: 1, v: 1 },
+    textureRepeat: { u: 1, v: 1, uniform: 1, linked: true },
     autoRotate: false,
     autoRotateSpeed: 0.5, // radians per second
   });

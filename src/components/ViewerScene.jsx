@@ -16,6 +16,14 @@ const PBRMesh = ({ textures, geometryType, settings }) => {
 
     const materialRef = useRef();
 
+    const applyRepeat = (tex) => {
+        if (!tex) return;
+        const u = settings.textureRepeat?.u ?? 1;
+        const v = settings.textureRepeat?.v ?? 1;
+        tex.repeat.set(u, v);
+        tex.needsUpdate = true;
+    };
+
     useEffect(() => {
         if (materialRef.current) {
             const mat = materialRef.current;
@@ -26,6 +34,7 @@ const PBRMesh = ({ textures, geometryType, settings }) => {
                     loader.load(url, (tex) => {
                         tex.colorSpace = mapType === 'map' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
                         tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+                        applyRepeat(tex);
                         mat[mapType] = tex;
                         mat.needsUpdate = true;
                     });
@@ -74,7 +83,7 @@ const PBRMesh = ({ textures, geometryType, settings }) => {
 
             mat.needsUpdate = true;
         }
-    }, [textures, settings.fresnelStrength, settings.fresnelPower]);
+    }, [textures, settings.fresnelStrength, settings.fresnelPower, settings.textureRepeat]);
 
     useEffect(() => {
         const shader = materialRef.current?.userData?.shader;
@@ -83,6 +92,13 @@ const PBRMesh = ({ textures, geometryType, settings }) => {
             shader.uniforms.fresnelPower.value = settings.fresnelPower;
         }
     }, [settings.fresnelStrength, settings.fresnelPower]);
+
+    useEffect(() => {
+        const mat = materialRef.current;
+        if (!mat) return;
+        const maps = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'displacementMap'];
+        maps.forEach((m) => applyRepeat(mat[m]));
+    }, [settings.textureRepeat]);
 
     let Geometry;
     switch (geometryType) {

@@ -353,18 +353,41 @@ const Controls = ({
                     />
                     <div className="mt-4 p-3 bg-gray-800/40 rounded-lg border border-white/5">
                         <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 block">Texture Repeat</label>
-                        <SliderControl
-                            label="Repeat U"
-                            value={settings.textureRepeat?.u ?? 1}
-                            min={0.1} max={10} step={0.1}
-                            onChange={(v) => updateSetting('textureRepeat', { ...settings.textureRepeat, u: v })}
+                        <ToggleControl
+                            label="Link U/V (Uniform)"
+                            checked={settings.textureRepeat?.linked ?? true}
+                            onChange={(linked) => {
+                                const uniformVal = settings.textureRepeat?.uniform ?? settings.textureRepeat?.u ?? 1;
+                                updateSetting('textureRepeat', {
+                                    ...settings.textureRepeat,
+                                    linked,
+                                    ...(linked ? { u: uniformVal, v: uniformVal, uniform: uniformVal } : {})
+                                });
+                            }}
                         />
-                        <SliderControl
-                            label="Repeat V"
-                            value={settings.textureRepeat?.v ?? 1}
-                            min={0.1} max={10} step={0.1}
-                            onChange={(v) => updateSetting('textureRepeat', { ...settings.textureRepeat, v: v })}
-                        />
+                        {(settings.textureRepeat?.linked ?? true) ? (
+                            <SliderControl
+                                label="Repeat (Uniform)"
+                                value={settings.textureRepeat?.uniform ?? settings.textureRepeat?.u ?? 1}
+                                min={0.1} max={10} step={0.1}
+                                onChange={(v) => updateSetting('textureRepeat', { ...settings.textureRepeat, uniform: v, u: v, v: v })}
+                            />
+                        ) : (
+                            <>
+                                <SliderControl
+                                    label="Repeat U"
+                                    value={settings.textureRepeat?.u ?? 1}
+                                    min={0.1} max={10} step={0.1}
+                                    onChange={(v) => updateSetting('textureRepeat', { ...settings.textureRepeat, u: v })}
+                                />
+                                <SliderControl
+                                    label="Repeat V"
+                                    value={settings.textureRepeat?.v ?? 1}
+                                    min={0.1} max={10} step={0.1}
+                                    onChange={(v) => updateSetting('textureRepeat', { ...settings.textureRepeat, v: v })}
+                                />
+                            </>
+                        )}
                     </div>
                 </div>
             </div>
