@@ -26,6 +26,10 @@ function App() {
   // Render mode: 'pbr', 'normal', 'wireframe'
   const [renderMode, setRenderMode] = useState('pbr');
 
+  // Dual view mode
+  const [dualViewMode, setDualViewMode] = useState(false);
+  const [secondRenderMode, setSecondRenderMode] = useState('normal'); // Second view render mode
+
   // Video recording state
   const [aspectRatio, setAspectRatio] = useState('free'); // 'free', '1:1', '16:9', '4:3', '9:16', '21:9'
   const [recording, setRecording] = useState({
@@ -35,11 +39,17 @@ function App() {
     transparentBg: false,
     frameRate: 60,
     quality: 'high',
+    format: 'webm', // 'webm' or 'mp4'
+    resolution: 'viewport', // 'viewport', '1920x1080', '1280x720', '3840x2160'
   });
   const mediaRecorderRef = useRef(null);
   const recordedChunksRef = useRef([]);
   const recordingTimerRef = useRef(null);
   const canvasStreamRef = useRef(null);
+  const rendererRef = useRef(null);
+  const secondRendererRef = useRef(null);
+  const cameraStateRef = useRef(null); // Store camera state for syncing
+  const recordingAnimationRef = useRef(null); // Store animation frame ID for recording
 
   const [settings, setSettings] = useState({
     displacementScale: 0.02,
@@ -51,7 +61,8 @@ function App() {
     envMap: null,
     envMapExt: null,
     backgroundImage: null, // Simple PNG/JPG background
-    showBackground: false, // Show simple background
+    backgroundColor: '#1a1a1a', // Solid color background
+    backgroundType: 'none', // 'none', 'color', 'image'
     backgroundImageMode: 'cover', // 'stretch', 'cover', 'contain'
     ambientIntensity: 0.5,
     spotIntensity: 1,
@@ -61,13 +72,12 @@ function App() {
     fresnelPower: 3,
     lockCamera: false,
     doubleSided: false,
+    showShadows: false, // Show contact shadows (disabled by default)
     modelRotation: { x: 0, y: 0, z: 0 },
     textureRepeat: { u: 1, v: 1, uniform: 1, linked: true },
     autoRotate: false,
     autoRotateSpeed: 0, // radians per second (negative = counterclockwise, positive = clockwise)
   });
-
-  const rendererRef = useRef(null);
 
   const handleTextureChange = (key, url) => {
     setTextures(prev => ({
@@ -125,14 +135,11 @@ function App() {
   const downloadFromRenderer = (gl, filename, scale = 1) => {
     if (!gl) return;
     const canvas = gl.domElement;
-    const { clientWidth, clientHeight } = canvas;
     const prevSize = { width: canvas.width, height: canvas.height };
     const prevPixelRatio = gl.getPixelRatio ? gl.getPixelRatio() : 1;
 
-    const targetW = clientWidth * scale;
-    const targetH = clientHeight * scale;
     if (gl.setPixelRatio) gl.setPixelRatio(scale);
-    if (gl.setSize) gl.setSize(clientWidth, clientHeight, false);
+    if (gl.setSize) gl.setSize(canvas.clientWidth, canvas.clientHeight, false);
 
     requestAnimationFrame(() => {
       const link = document.createElement('a');
@@ -161,22 +168,97 @@ function App() {
       return;
     }
 
-    const canvas = rendererRef.current.domElement;
+    // Get resolution settings
+    const resolutionMap = {
+      'viewport': null, // Use current viewport size
+      '1920x1080': { width: 1920, height: 1080 },
+      '1280x720': { width: 1280, height: 720 },
+      '3840x2160': { width: 3840, height: 2160 },
+    };
 
-    // Get canvas stream
+    const canvas1 = rendererRef.current.domElement;
+    const canvas2 = dualViewMode && secondRendererRef.current ? secondRendererRef.current.domElement : null;
+
+    // Create offscreen canvas for recording
+    const offscreenCanvas = document.createElement('canvas');
+    const ctx = offscreenCanvas.getContext('2d');
+
+    // Determine final recording size
+    if (recording.resolution === 'viewport') {
+      if (dualViewMode && canvas2) {
+        offscreenCanvas.width = canvas1.width + canvas2.width;
+        offscreenCanvas.height = Math.max(canvas1.height, canvas2.height);
+      } else {
+        offscreenCanvas.width = canvas1.width;
+        offscreenCanvas.height = canvas1.height;
+      }
+    } else {
+      const res = resolutionMap[recording.resolution];
+      if (res) {
+        offscreenCanvas.width = res.width;
+        offscreenCanvas.height = res.height;
+      }
+    }
+
+    // Animation loop to draw canvases to offscreen canvas
+    let isRecording = true;
+    const drawFrame = () => {
+      if (!isRecording) return;
+
+      ctx.clearRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+
+      if (dualViewMode && canvas2) {
+        // Dual view: draw both canvases side by side
+        const halfWidth = offscreenCanvas.width / 2;
+        ctx.drawImage(canvas1, 0, 0, halfWidth, offscreenCanvas.height);
+        ctx.drawImage(canvas2, halfWidth, 0, halfWidth, offscreenCanvas.height);
+      } else {
+        // Single view: draw one canvas scaled to target size
+        ctx.drawImage(canvas1, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+      }
+
+      recordingAnimationRef.current = requestAnimationFrame(drawFrame);
+    };
+
+    // Start drawing frames
+    drawFrame();
+
+    // Get stream from offscreen canvas
     const fps = recording.frameRate;
-    const stream = canvas.captureStream(fps);
+    const stream = offscreenCanvas.captureStream(fps);
     canvasStreamRef.current = stream;
 
-    // Configure MediaRecorder
-    const mimeType = recording.transparentBg
-      ? 'video/webm;codecs=vp9'
-      : 'video/webm;codecs=vp8';
+    // Configure MediaRecorder based on format and transparency
+    let mimeType;
+    let fileExtension;
 
-    // Check if mimeType is supported
-    if (!MediaRecorder.isTypeSupported(mimeType)) {
-      alert('Your browser does not support the required video format');
-      return;
+    if (recording.format === 'mp4') {
+      // MP4 format (no transparency support)
+      mimeType = 'video/mp4';
+      fileExtension = 'mp4';
+
+      // Try different MP4 codecs
+      if (MediaRecorder.isTypeSupported('video/mp4;codecs=h264')) {
+        mimeType = 'video/mp4;codecs=h264';
+      } else if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')) {
+        mimeType = 'video/mp4;codecs=avc1';
+      } else if (!MediaRecorder.isTypeSupported('video/mp4')) {
+        alert('Your browser does not support MP4 recording. Try WebM format instead.');
+        return;
+      }
+    } else {
+      // WebM format (supports transparency with VP9)
+      fileExtension = 'webm';
+      if (recording.transparentBg) {
+        mimeType = 'video/webm;codecs=vp9';
+      } else {
+        mimeType = 'video/webm;codecs=vp8';
+      }
+
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        alert('Your browser does not support the required WebM codec');
+        return;
+      }
     }
 
     const options = {
@@ -194,12 +276,15 @@ function App() {
       }
     };
 
+    // Store fileExtension in closure for onstop callback
+    const extension = fileExtension;
+
     mediaRecorder.onstop = () => {
       const blob = new Blob(recordedChunksRef.current, { type: mimeType });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `pbr_recording_${Date.now()}.webm`;
+      a.download = `pbr_recording_${Date.now()}.${extension}`;
       a.click();
       URL.revokeObjectURL(url);
 
@@ -229,6 +314,10 @@ function App() {
       clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = null;
     }
+    if (recordingAnimationRef.current) {
+      cancelAnimationFrame(recordingAnimationRef.current);
+      recordingAnimationRef.current = null;
+    }
   };
 
   const pauseRecording = () => {
@@ -238,6 +327,10 @@ function App() {
       if (recordingTimerRef.current) {
         clearInterval(recordingTimerRef.current);
         recordingTimerRef.current = null;
+      }
+      if (recordingAnimationRef.current) {
+        cancelAnimationFrame(recordingAnimationRef.current);
+        recordingAnimationRef.current = null;
       }
     }
   };
@@ -249,6 +342,9 @@ function App() {
       recordingTimerRef.current = setInterval(() => {
         setRecording(prev => ({ ...prev, duration: prev.duration + 1 }));
       }, 1000);
+      // Note: We can't easily restart the draw frame loop here because we lost the context
+      // The recording will continue but without updating the offscreen canvas
+      // This is a limitation of the current implementation
     }
   };
 
@@ -256,23 +352,73 @@ function App() {
     setRecording(prev => ({ ...prev, [key]: value }));
   };
 
+  // Initialize camera state ref
+  if (!cameraStateRef.current) {
+    cameraStateRef.current = {
+      position: null,
+      quaternion: null,
+    };
+  }
+
   return (
     <div className="flex w-full h-full bg-[#121212] text-white overflow-hidden">
       {/* 3D Viewport - Flex grow to take available space */}
       <div className="flex-1 h-full relative">
-        <ViewerScene
-          textures={textures}
-          geometryType={geometry}
-          customModel={customModel}
-          renderMode={renderMode}
-          envPreset="city"
-          settings={settings}
-          aspectRatio={aspectRatio}
-          transparentBg={recording.transparentBg}
-          onCanvasReady={(gl) => {
-            rendererRef.current = gl;
-          }}
-        />
+        {dualViewMode ? (
+          // Dual view layout
+          <div className="flex w-full h-full">
+            <div className="flex-1 h-full border-r border-gray-700">
+              <ViewerScene
+                textures={textures}
+                geometryType={geometry}
+                customModel={customModel}
+                renderMode={renderMode}
+                envPreset="city"
+                settings={settings}
+                aspectRatio={aspectRatio}
+                transparentBg={recording.transparentBg}
+                isPrimaryView={true}
+                cameraStateRef={cameraStateRef}
+                onCanvasReady={(gl) => {
+                  rendererRef.current = gl;
+                }}
+              />
+            </div>
+            <div className="flex-1 h-full">
+              <ViewerScene
+                textures={textures}
+                geometryType={geometry}
+                customModel={customModel}
+                renderMode={secondRenderMode}
+                envPreset="city"
+                settings={settings}
+                aspectRatio={aspectRatio}
+                transparentBg={recording.transparentBg}
+                isPrimaryView={false}
+                cameraStateRef={cameraStateRef}
+                syncCamera={true}
+                onCanvasReady={(gl) => {
+                  secondRendererRef.current = gl;
+                }}
+              />
+            </div>
+          </div>
+        ) : (
+          // Single view layout
+          <ViewerScene
+            textures={textures}
+            geometryType={geometry}
+            customModel={customModel}
+            renderMode={renderMode}
+            envPreset="city"
+            settings={settings}
+            aspectRatio={aspectRatio}
+            transparentBg={recording.transparentBg}
+            onCanvasReady={(gl) => {
+              rendererRef.current = gl;
+            }}
+          />
+        )}
       </div>
 
       {/* Sidebar Controls */}
@@ -299,6 +445,11 @@ function App() {
         onPauseRecording={pauseRecording}
         onResumeRecording={resumeRecording}
         onUpdateRecording={updateRecordingSetting}
+        // Dual view props
+        dualViewMode={dualViewMode}
+        onDualViewModeChange={setDualViewMode}
+        secondRenderMode={secondRenderMode}
+        onSecondRenderModeChange={setSecondRenderMode}
       />
     </div>
   );

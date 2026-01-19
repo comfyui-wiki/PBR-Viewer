@@ -417,9 +417,127 @@ const CanvasHandle = ({ onReady }) => {
     return null;
 };
 
-// Removed: BackgroundImage component - now using CSS background instead
+// Background plane that follows camera (for recording)
+const BackgroundPlane = ({ imageUrl, color, show, mode = 'cover' }) => {
+    const { camera, size } = useThree();
+    const [texture, setTexture] = useState(null);
+    const meshRef = useRef();
 
-const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMode = 'pbr', envPreset = "studio", bgColor = "#121212", settings, aspectRatio = 'free', transparentBg = false, onCanvasReady }) => {
+    // Load texture if image URL provided
+    useEffect(() => {
+        if (!show || !imageUrl) {
+            setTexture(null);
+            return;
+        }
+
+        const loader = new THREE.TextureLoader();
+        loader.load(
+            imageUrl,
+            (loadedTexture) => {
+                loadedTexture.colorSpace = THREE.SRGBColorSpace;
+                setTexture(loadedTexture);
+            },
+            undefined,
+            (error) => {
+                console.error('Error loading background image:', error);
+            }
+        );
+    }, [imageUrl, show]);
+
+    // Update plane position and size every frame to follow camera
+    useFrame(() => {
+        if (!meshRef.current || !camera) return;
+
+        // Position plane behind camera
+        const distance = 15; // Distance behind camera
+        const direction = new THREE.Vector3(0, 0, -1);
+        direction.applyQuaternion(camera.quaternion);
+
+        const position = camera.position.clone().add(direction.multiplyScalar(distance));
+        meshRef.current.position.copy(position);
+        meshRef.current.quaternion.copy(camera.quaternion);
+
+        // Calculate plane size based on camera FOV
+        const canvasAspect = size.width / size.height;
+
+        const vFov = camera.fov * Math.PI / 180;
+        const planeHeight = 2 * Math.tan(vFov / 2) * distance;
+        const planeWidth = planeHeight * canvasAspect;
+
+        let finalWidth = planeWidth;
+        let finalHeight = planeHeight;
+
+        if (color || mode === 'stretch') {
+            // For solid color or stretch mode, fill the entire view
+            finalWidth = planeWidth;
+            finalHeight = planeHeight;
+        } else if (texture) {
+            const imageAspect = texture.image.width / texture.image.height;
+
+            if (mode === 'cover') {
+                if (canvasAspect > imageAspect) {
+                    finalWidth = planeWidth;
+                    finalHeight = finalWidth / imageAspect;
+                } else {
+                    finalHeight = planeHeight;
+                    finalWidth = finalHeight * imageAspect;
+                }
+            } else if (mode === 'contain') {
+                if (canvasAspect > imageAspect) {
+                    finalHeight = planeHeight;
+                    finalWidth = finalHeight * imageAspect;
+                } else {
+                    finalWidth = planeWidth;
+                    finalHeight = finalWidth / imageAspect;
+                }
+            }
+        }
+
+        meshRef.current.scale.set(finalWidth, finalHeight, 1);
+    });
+
+    if (!show) return null;
+
+    return (
+        <mesh ref={meshRef} renderOrder={-999}>
+            <planeGeometry args={[1, 1]} />
+            <meshBasicMaterial
+                map={texture || null}
+                color={color || '#ffffff'}
+                depthTest={false}
+                depthWrite={false}
+                toneMapped={false}
+            />
+        </mesh>
+    );
+};
+
+// Camera sync component for syncing cameras between dual views
+const CameraSync = ({ cameraStateRef, isPrimaryView, syncCamera }) => {
+    const { camera } = useThree();
+
+    useFrame(() => {
+        if (isPrimaryView) {
+            // Primary view: update camera state
+            if (cameraStateRef && cameraStateRef.current) {
+                cameraStateRef.current.position = camera.position.clone();
+                cameraStateRef.current.quaternion = camera.quaternion.clone();
+            }
+        } else if (syncCamera && cameraStateRef && cameraStateRef.current) {
+            // Secondary view: sync from primary camera
+            if (cameraStateRef.current.position) {
+                camera.position.copy(cameraStateRef.current.position);
+            }
+            if (cameraStateRef.current.quaternion) {
+                camera.quaternion.copy(cameraStateRef.current.quaternion);
+            }
+        }
+    });
+
+    return null;
+};
+
+const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMode = 'pbr', envPreset = "studio", bgColor = "#121212", settings, aspectRatio = 'free', transparentBg = false, onCanvasReady, isPrimaryView = true, cameraStateRef = null, syncCamera = false }) => {
     const rot = settings.modelRotation || { x: 0, y: 0, z: 0 };
     const rotRad = {
         x: (rot.x || 0) * Math.PI / 180,
@@ -439,7 +557,7 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
 
     // Background image CSS mode mapping
     const getBackgroundSize = () => {
-        if (!settings.backgroundImage || !settings.showBackground || transparentBg) return 'auto';
+        if (!settings.backgroundImage || settings.backgroundType !== 'image' || transparentBg) return 'auto';
         switch (settings.backgroundImageMode) {
             case 'stretch': return '100% 100%';
             case 'cover': return 'cover';
@@ -449,14 +567,16 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
     };
 
     const outerContainerStyle = {
-        background: transparentBg ? 'transparent' : bgColor,
+        background: transparentBg ? 'transparent' :
+                   settings.backgroundType === 'color' ? settings.backgroundColor : bgColor,
     };
 
     const containerStyle = {
-        background: transparentBg ? 'transparent' : bgColor,
+        background: transparentBg ? 'transparent' :
+                   settings.backgroundType === 'color' ? settings.backgroundColor : bgColor,
         ...(aspectRatioMap[aspectRatio] ? { aspectRatio: aspectRatioMap[aspectRatio] } : {}),
         // Apply background image if enabled
-        ...(settings.backgroundImage && settings.showBackground && !transparentBg ? {
+        ...(settings.backgroundImage && settings.backgroundType === 'image' && !transparentBg ? {
             backgroundImage: `url(${settings.backgroundImage})`,
             backgroundSize: getBackgroundSize(),
             backgroundPosition: 'center',
@@ -469,21 +589,55 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
             <div className="w-full" style={containerStyle}>
                 <Canvas
                     shadows
+                    dpr={1}
                     gl={{
                         preserveDrawingBuffer: true,
-                        alpha: true, // Always enable alpha for canvas to show CSS background
+                        alpha: transparentBg, // Enable alpha only for transparent background
                         premultipliedAlpha: false,
                     }}
                     camera={{ position: [0, 0, 4], fov: 45 }}
                     onCreated={({ gl, scene }) => {
-                        // Always set scene background to null to show CSS background
-                        scene.background = null;
+                        // Set scene background based on background type
+                        if (!transparentBg) {
+                            if (settings.backgroundType === 'color') {
+                                scene.background = new THREE.Color(settings.backgroundColor);
+                            } else if (settings.backgroundType === 'none') {
+                                scene.background = new THREE.Color(bgColor);
+                            } else {
+                                scene.background = null;
+                            }
+                        } else {
+                            scene.background = null;
+                        }
                         if (onCanvasReady) onCanvasReady(gl);
                     }}
                 >
                 <CanvasHandle onReady={onCanvasReady} />
 
-                {/* Background image now handled via CSS - see container style */}
+                {/* Camera sync for dual view mode */}
+                {cameraStateRef && (
+                    <CameraSync
+                        cameraStateRef={cameraStateRef}
+                        isPrimaryView={isPrimaryView}
+                        syncCamera={syncCamera}
+                    />
+                )}
+
+                {/* Background plane for recording - renders in 3D scene */}
+                {!transparentBg && settings.backgroundType === 'image' && settings.backgroundImage && (
+                    <BackgroundPlane
+                        imageUrl={settings.backgroundImage}
+                        show={true}
+                        mode={settings.backgroundImageMode}
+                    />
+                )}
+                {!transparentBg && settings.backgroundType === 'color' && (
+                    <BackgroundPlane
+                        color={settings.backgroundColor}
+                        show={true}
+                        mode="stretch"
+                    />
+                )}
 
                 <React.Suspense fallback={null}>
                     <CustomEnvironment settings={settings} preset={envPreset} />
@@ -507,13 +661,15 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
                     renderMode={renderMode}
                 />
 
-                <ContactShadows position={[0, -1.5, 0]} opacity={0.4} scale={10} blur={2.5} far={4} />
+                {settings.showShadows && (
+                    <ContactShadows position={[0, -1.5, 0]} opacity={0.4} scale={10} blur={2.5} far={4} />
+                )}
                 <OrbitControls
                     makeDefault
                     autoRotate={false}
-                    enableRotate={!settings.lockCamera}
-                    enableZoom={!settings.lockCamera}
-                    enablePan={!settings.lockCamera}
+                    enableRotate={!settings.lockCamera && (isPrimaryView || !syncCamera)}
+                    enableZoom={!settings.lockCamera && (isPrimaryView || !syncCamera)}
+                    enablePan={!settings.lockCamera && (isPrimaryView || !syncCamera)}
                 />
                 </Canvas>
             </div>

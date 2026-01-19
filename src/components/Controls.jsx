@@ -213,6 +213,11 @@ const Controls = ({
     onPauseRecording,
     onResumeRecording,
     onUpdateRecording,
+    // Dual view props
+    dualViewMode,
+    onDualViewModeChange,
+    secondRenderMode,
+    onSecondRenderModeChange,
 }) => {
 
     const handleUpload = (key, file) => {
@@ -270,6 +275,21 @@ const Controls = ({
                     <RenderModeSelector current={renderMode} onChange={onRenderModeChange} />
                 </div>
 
+                {/* Dual View Mode */}
+                <div className="mb-6 p-3 bg-gray-800/40 rounded-lg border border-white/5">
+                    <ToggleControl
+                        label="Dual View Mode"
+                        checked={dualViewMode}
+                        onChange={onDualViewModeChange}
+                    />
+                    {dualViewMode && (
+                        <div className="mt-3 pt-3 border-t border-white/5">
+                            <label className="text-xs text-gray-500 mb-2 block">Second View Mode</label>
+                            <RenderModeSelector current={secondRenderMode} onChange={onSecondRenderModeChange} />
+                        </div>
+                    )}
+                </div>
+
                 {/* Aspect Ratio Selector */}
                 <div className="mb-6">
                     <AspectRatioSelector current={aspectRatio} onChange={onAspectRatioChange} />
@@ -282,12 +302,54 @@ const Controls = ({
                         <span className="text-xs font-semibold uppercase tracking-wider">Video Recording</span>
                     </div>
 
-                    {/* Transparent Background Toggle */}
-                    <ToggleControl
-                        label="Transparent Background"
-                        checked={recording.transparentBg}
-                        onChange={(v) => onUpdateRecording('transparentBg', v)}
-                    />
+                    {/* Format Selector */}
+                    <div className="mb-3">
+                        <label className="text-xs text-gray-500 mb-1 block">Output Format</label>
+                        <div className="grid grid-cols-2 gap-2">
+                            {[
+                                { id: 'webm', label: 'WebM', desc: 'Best quality, supports transparency' },
+                                { id: 'mp4', label: 'MP4', desc: 'Better compatibility' }
+                            ].map((format) => (
+                                <button
+                                    key={format.id}
+                                    onClick={() => {
+                                        onUpdateRecording('format', format.id);
+                                        // Auto-disable transparency for MP4
+                                        if (format.id === 'mp4' && recording.transparentBg) {
+                                            onUpdateRecording('transparentBg', false);
+                                        }
+                                    }}
+                                    disabled={recording.isRecording}
+                                    title={format.desc}
+                                    className={`
+                                        py-2 px-3 rounded text-xs font-medium transition-all
+                                        ${recording.format === format.id
+                                            ? 'bg-purple-600 text-white'
+                                            : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                                        }
+                                        ${recording.isRecording ? 'opacity-50 cursor-not-allowed' : ''}
+                                    `}
+                                >
+                                    {format.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Transparent Background Toggle - Only for WebM */}
+                    {recording.format === 'webm' && (
+                        <ToggleControl
+                            label="Transparent Background"
+                            checked={recording.transparentBg}
+                            onChange={(v) => onUpdateRecording('transparentBg', v)}
+                        />
+                    )}
+
+                    {recording.format === 'mp4' && (
+                        <div className="mb-3 p-2 bg-yellow-600/10 border border-yellow-500/30 rounded text-xs text-yellow-300">
+                            ⓘ MP4 does not support transparent background
+                        </div>
+                    )}
 
                     {/* Frame Rate Selector */}
                     <div className="mb-3">
@@ -336,6 +398,36 @@ const Controls = ({
                                     `}
                                 >
                                     {q.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Resolution Selector */}
+                    <div className="mb-3">
+                        <label className="text-xs text-gray-500 mb-1 block">Recording Resolution</label>
+                        <div className="grid grid-cols-2 gap-2">
+                            {[
+                                { id: 'viewport', label: 'Viewport', desc: 'Current size' },
+                                { id: '1280x720', label: '720p', desc: '1280 x 720' },
+                                { id: '1920x1080', label: '1080p', desc: '1920 x 1080' },
+                                { id: '3840x2160', label: '4K', desc: '3840 x 2160' }
+                            ].map((res) => (
+                                <button
+                                    key={res.id}
+                                    onClick={() => onUpdateRecording('resolution', res.id)}
+                                    disabled={recording.isRecording}
+                                    title={res.desc}
+                                    className={`
+                                        py-1.5 px-2 rounded text-xs font-medium transition-all
+                                        ${recording.resolution === res.id
+                                            ? 'bg-purple-600 text-white'
+                                            : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                                        }
+                                        ${recording.isRecording ? 'opacity-50 cursor-not-allowed' : ''}
+                                    `}
+                                >
+                                    {res.label}
                                 </button>
                             ))}
                         </div>
@@ -391,9 +483,15 @@ const Controls = ({
                         )}
                     </div>
 
-                    {recording.transparentBg && (
+                    {/* Format info */}
+                    {recording.format === 'webm' && recording.transparentBg && (
                         <div className="mt-3 p-2 bg-blue-600/10 border border-blue-500/30 rounded text-xs text-blue-300">
-                            ⓘ Transparent background will be exported as WebM with VP9 codec
+                            ⓘ Transparent background uses WebM VP9 codec
+                        </div>
+                    )}
+                    {recording.format === 'mp4' && (
+                        <div className="mt-3 p-2 bg-green-600/10 border border-green-500/30 rounded text-xs text-green-300">
+                            ⓘ MP4 works best in Safari. Chrome/Firefox may have limited support.
                         </div>
                     )}
                 </div>
@@ -412,58 +510,97 @@ const Controls = ({
                     />
 
                     <div className="mb-4 p-3 bg-gray-800/40 rounded-lg border border-white/10">
-                        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 block">Background Image</label>
-                        <ToggleControl
-                            label="Show Background"
-                            checked={settings.showBackground}
-                            onChange={(v) => updateSetting('showBackground', v)}
-                        />
-                        <TextureSlot
-                            label="Upload Image (PNG/JPG)"
-                            file={settings.backgroundImage}
-                            onUpload={(f) => {
-                                const url = URL.createObjectURL(f);
-                                updateSetting('backgroundImage', url);
-                                updateSetting('showBackground', true);
-                            }}
-                            onClear={() => {
-                                updateSetting('backgroundImage', null);
-                                updateSetting('showBackground', false);
-                            }}
-                            accept=".jpg,.jpeg,.png,.webp"
-                        />
+                        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 block">Background</label>
 
-                        {/* Background Image Mode Selector */}
-                        {settings.backgroundImage && (
-                            <div className="mt-3">
-                                <label className="text-xs text-gray-500 mb-1 block">Display Mode</label>
-                                <div className="grid grid-cols-3 gap-2">
-                                    {[
-                                        { id: 'stretch', label: 'Stretch' },
-                                        { id: 'cover', label: 'Cover' },
-                                        { id: 'contain', label: 'Contain' }
-                                    ].map((mode) => (
-                                        <button
-                                            key={mode.id}
-                                            onClick={() => updateSetting('backgroundImageMode', mode.id)}
-                                            className={`
-                                                py-1.5 px-2 rounded text-xs font-medium transition-all
-                                                ${settings.backgroundImageMode === mode.id
-                                                    ? 'bg-blue-600 text-white'
-                                                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-                                                }
-                                            `}
-                                        >
-                                            {mode.label}
-                                        </button>
-                                    ))}
-                                </div>
-                                <div className="mt-2 text-xs text-gray-500">
-                                    {settings.backgroundImageMode === 'stretch' && '↔ Stretch to fill (may distort)'}
-                                    {settings.backgroundImageMode === 'cover' && '⊞ Cover canvas (crops image)'}
-                                    {settings.backgroundImageMode === 'contain' && '⊡ Fit inside (may show borders)'}
-                                </div>
+                        {/* Background Type Selector */}
+                        <div className="mb-3">
+                            <label className="text-xs text-gray-500 mb-1 block">Type</label>
+                            <div className="grid grid-cols-3 gap-2">
+                                {[
+                                    { id: 'none', label: 'None' },
+                                    { id: 'color', label: 'Color' },
+                                    { id: 'image', label: 'Image' }
+                                ].map((type) => (
+                                    <button
+                                        key={type.id}
+                                        onClick={() => updateSetting('backgroundType', type.id)}
+                                        className={`
+                                            py-1.5 px-2 rounded text-xs font-medium transition-all
+                                            ${settings.backgroundType === type.id
+                                                ? 'bg-blue-600 text-white'
+                                                : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                                            }
+                                        `}
+                                    >
+                                        {type.label}
+                                    </button>
+                                ))}
                             </div>
+                        </div>
+
+                        {/* Color Picker - Show when type is 'color' */}
+                        {settings.backgroundType === 'color' && (
+                            <div className="mb-3">
+                                <label className="text-xs text-gray-500 mb-1 block">Background Color</label>
+                                <input
+                                    type="color"
+                                    value={settings.backgroundColor}
+                                    onChange={(e) => updateSetting('backgroundColor', e.target.value)}
+                                    className="w-full h-10 rounded cursor-pointer bg-gray-800 border border-gray-600"
+                                />
+                                <div className="mt-1 text-xs text-gray-500 font-mono">{settings.backgroundColor}</div>
+                            </div>
+                        )}
+
+                        {/* Image Upload - Show when type is 'image' */}
+                        {settings.backgroundType === 'image' && (
+                            <>
+                                <TextureSlot
+                                    label="Upload Image (PNG/JPG)"
+                                    file={settings.backgroundImage}
+                                    onUpload={(f) => {
+                                        const url = URL.createObjectURL(f);
+                                        updateSetting('backgroundImage', url);
+                                    }}
+                                    onClear={() => {
+                                        updateSetting('backgroundImage', null);
+                                    }}
+                                    accept=".jpg,.jpeg,.png,.webp"
+                                />
+
+                                {/* Background Image Mode Selector */}
+                                {settings.backgroundImage && (
+                                    <div className="mt-3">
+                                        <label className="text-xs text-gray-500 mb-1 block">Display Mode</label>
+                                        <div className="grid grid-cols-3 gap-2">
+                                            {[
+                                                { id: 'stretch', label: 'Stretch' },
+                                                { id: 'cover', label: 'Cover' },
+                                                { id: 'contain', label: 'Contain' }
+                                            ].map((mode) => (
+                                                <button
+                                                    key={mode.id}
+                                                    onClick={() => updateSetting('backgroundImageMode', mode.id)}
+                                                    className={`
+                                                        py-1.5 px-2 rounded text-xs font-medium transition-all
+                                                        ${settings.backgroundImageMode === mode.id
+                                                            ? 'bg-blue-600 text-white'
+                                                            : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                                                        }
+                                                    `}
+                                                >
+                                                    {mode.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <div className="mt-2 text-xs text-gray-500">
+                                            {settings.backgroundImageMode === 'stretch' && '↔ Stretch to fill (may distort)'}
+                                            {settings.backgroundImageMode === 'cover' && '⊞ Cover canvas (crops image)'}
+                                            {settings.backgroundImageMode === 'contain' && '⊡ Fit inside (may show borders)'}
+                                        </div>
+                                    </div>
+                                )}
+                            </>
                         )}
                     </div>
 
@@ -537,6 +674,11 @@ const Controls = ({
                         label="Double-Sided Rendering"
                         checked={settings.doubleSided}
                         onChange={(v) => updateSetting('doubleSided', v)}
+                    />
+                    <ToggleControl
+                        label="Show Contact Shadows"
+                        checked={settings.showShadows}
+                        onChange={(v) => updateSetting('showShadows', v)}
                     />
                     <ToggleControl
                         label="Auto Rotate Model"
