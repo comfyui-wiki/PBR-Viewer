@@ -16,6 +16,31 @@ function App() {
 
   const [geometry, setGeometry] = useState('Sphere');
 
+  // Custom model state
+  const [customModel, setCustomModel] = useState({
+    data: null,     // The loaded 3D object
+    file: null,     // File info
+    type: null,     // 'obj', 'gltf', 'fbx', etc.
+  });
+
+  // Render mode: 'pbr', 'normal', 'wireframe'
+  const [renderMode, setRenderMode] = useState('pbr');
+
+  // Video recording state
+  const [aspectRatio, setAspectRatio] = useState('free'); // 'free', '1:1', '16:9', '4:3', '9:16', '21:9'
+  const [recording, setRecording] = useState({
+    isRecording: false,
+    isPaused: false,
+    duration: 0,
+    transparentBg: false,
+    frameRate: 60,
+    quality: 'high',
+  });
+  const mediaRecorderRef = useRef(null);
+  const recordedChunksRef = useRef([]);
+  const recordingTimerRef = useRef(null);
+  const canvasStreamRef = useRef(null);
+
   const [settings, setSettings] = useState({
     displacementScale: 0.02,
     normalScale: 1,
@@ -25,6 +50,9 @@ function App() {
     showEnvironment: false,
     envMap: null,
     envMapExt: null,
+    backgroundImage: null, // Simple PNG/JPG background
+    showBackground: false, // Show simple background
+    backgroundImageMode: 'cover', // 'stretch', 'cover', 'contain'
     ambientIntensity: 0.5,
     spotIntensity: 1,
     spotAngle: 0.2,
@@ -36,7 +64,7 @@ function App() {
     modelRotation: { x: 0, y: 0, z: 0 },
     textureRepeat: { u: 1, v: 1, uniform: 1, linked: true },
     autoRotate: false,
-    autoRotateSpeed: 0.5, // radians per second
+    autoRotateSpeed: 0, // radians per second (negative = counterclockwise, positive = clockwise)
   });
 
   const rendererRef = useRef(null);
@@ -46,6 +74,16 @@ function App() {
       ...prev,
       [key]: url
     }));
+  };
+
+  const handleModelUpload = (modelData, fileInfo) => {
+    setCustomModel({
+      data: modelData,
+      file: fileInfo,
+      type: fileInfo.type,
+    });
+    // Switch to custom geometry when model is uploaded
+    setGeometry('Custom');
   };
 
   const handleDownload = async () => {
@@ -116,6 +154,108 @@ function App() {
     downloadFromRenderer(rendererRef.current, 'pbr_full.png', 2);
   };
 
+  // Video recording functions
+  const startRecording = () => {
+    if (!rendererRef.current) {
+      alert('Canvas not ready');
+      return;
+    }
+
+    const canvas = rendererRef.current.domElement;
+
+    // Get canvas stream
+    const fps = recording.frameRate;
+    const stream = canvas.captureStream(fps);
+    canvasStreamRef.current = stream;
+
+    // Configure MediaRecorder
+    const mimeType = recording.transparentBg
+      ? 'video/webm;codecs=vp9'
+      : 'video/webm;codecs=vp8';
+
+    // Check if mimeType is supported
+    if (!MediaRecorder.isTypeSupported(mimeType)) {
+      alert('Your browser does not support the required video format');
+      return;
+    }
+
+    const options = {
+      mimeType,
+      videoBitsPerSecond: recording.quality === 'high' ? 8000000 : recording.quality === 'medium' ? 4000000 : 2000000,
+    };
+
+    recordedChunksRef.current = [];
+    const mediaRecorder = new MediaRecorder(stream, options);
+    mediaRecorderRef.current = mediaRecorder;
+
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        recordedChunksRef.current.push(event.data);
+      }
+    };
+
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `pbr_recording_${Date.now()}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      // Reset
+      recordedChunksRef.current = [];
+      setRecording(prev => ({ ...prev, isRecording: false, isPaused: false, duration: 0 }));
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+    };
+
+    mediaRecorder.start(100); // Collect data every 100ms
+
+    // Start timer
+    setRecording(prev => ({ ...prev, isRecording: true, duration: 0 }));
+    recordingTimerRef.current = setInterval(() => {
+      setRecording(prev => ({ ...prev, duration: prev.duration + 1 }));
+    }, 1000);
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  };
+
+  const pauseRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.pause();
+      setRecording(prev => ({ ...prev, isPaused: true }));
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+    }
+  };
+
+  const resumeRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+      mediaRecorderRef.current.resume();
+      setRecording(prev => ({ ...prev, isPaused: false }));
+      recordingTimerRef.current = setInterval(() => {
+        setRecording(prev => ({ ...prev, duration: prev.duration + 1 }));
+      }, 1000);
+    }
+  };
+
+  const updateRecordingSetting = (key, value) => {
+    setRecording(prev => ({ ...prev, [key]: value }));
+  };
+
   return (
     <div className="flex w-full h-full bg-[#121212] text-white overflow-hidden">
       {/* 3D Viewport - Flex grow to take available space */}
@@ -123,24 +263,16 @@ function App() {
         <ViewerScene
           textures={textures}
           geometryType={geometry}
+          customModel={customModel}
+          renderMode={renderMode}
           envPreset="city"
           settings={settings}
+          aspectRatio={aspectRatio}
+          transparentBg={recording.transparentBg}
           onCanvasReady={(gl) => {
             rendererRef.current = gl;
           }}
         />
-
-        {/* Overlay info */}
-        <div className="absolute top-4 left-4 pointer-events-none">
-          <div className="flex gap-2">
-            <span className="px-2 py-1 rounded bg-black/40 backdrop-blur text-xs font-mono text-white/50 border border-white/5">
-              {geometry}
-            </span>
-            <span className="px-2 py-1 rounded bg-black/40 backdrop-blur text-xs font-mono text-white/50 border border-white/5">
-              Env: City
-            </span>
-          </div>
-        </div>
       </div>
 
       {/* Sidebar Controls */}
@@ -149,11 +281,24 @@ function App() {
         onTextureChange={handleTextureChange}
         geometry={geometry}
         onGeometryChange={setGeometry}
+        customModel={customModel}
+        onModelUpload={handleModelUpload}
+        renderMode={renderMode}
+        onRenderModeChange={setRenderMode}
         settings={settings}
         onSettingsChange={setSettings}
         onDownload={handleDownload}
         onDownloadRender={handleDownloadRenderPng}
         onDownloadFull={handleDownloadFullPng}
+        // Video recording props
+        aspectRatio={aspectRatio}
+        onAspectRatioChange={setAspectRatio}
+        recording={recording}
+        onStartRecording={startRecording}
+        onStopRecording={stopRecording}
+        onPauseRecording={pauseRecording}
+        onResumeRecording={resumeRecording}
+        onUpdateRecording={updateRecordingSetting}
       />
     </div>
   );

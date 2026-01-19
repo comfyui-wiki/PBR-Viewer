@@ -4,8 +4,13 @@ import { OrbitControls, Environment, ContactShadows, useTexture } from "@react-t
 import * as THREE from "three";
 import { RGBELoader } from "three-stdlib";
 import { EXRLoader } from "three-stdlib";
+import { OBJLoader } from "three-stdlib";
+import { GLTFLoader } from "three-stdlib";
+import { FBXLoader } from "three-stdlib";
+import { STLLoader } from "three-stdlib";
+import { ColladaLoader } from "three-stdlib";
 
-const PBRMesh = ({ textures, geometryType, settings }) => {
+const PBRMesh = ({ textures, geometryType, settings, renderMode = 'pbr' }) => {
     const meshRef = useRef();
 
     // Load textures if they exist. Use a placeholder if not, or just null.
@@ -119,9 +124,27 @@ const PBRMesh = ({ textures, geometryType, settings }) => {
             Geometry = <sphereGeometry args={[1, 128, 128]} />;
     }
 
-    return (
-        <mesh ref={meshRef} castShadow receiveShadow>
-            {Geometry}
+    // Render different materials based on renderMode
+    let Material;
+    if (renderMode === 'normal') {
+        // Normal visualization material
+        Material = (
+            <meshNormalMaterial
+                side={settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide}
+            />
+        );
+    } else if (renderMode === 'wireframe') {
+        // Wireframe material
+        Material = (
+            <meshBasicMaterial
+                wireframe
+                color="#00aaff"
+                side={settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide}
+            />
+        );
+    } else {
+        // PBR material (default)
+        Material = (
             <meshStandardMaterial
                 ref={materialRef}
                 displacementScale={settings.displacementScale}
@@ -131,11 +154,189 @@ const PBRMesh = ({ textures, geometryType, settings }) => {
                 metalness={settings.metalness}
                 side={settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide}
             />
+        );
+    }
+
+    return (
+        <mesh ref={meshRef} castShadow receiveShadow>
+            {Geometry}
+            {Material}
         </mesh>
     );
 };
 
-const ModelGroup = ({ geometryType, textures, settings, rotationBase }) => {
+// Component for loading and displaying custom 3D models
+const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoaded }) => {
+    const [model, setModel] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const groupRef = useRef();
+    const materialRef = useRef();
+
+    useEffect(() => {
+        if (!customModel?.file?.url) return;
+
+        const fileUrl = customModel.file.url;
+        const fileType = customModel.file.type;
+
+        setLoading(true);
+
+        let loader;
+        switch (fileType) {
+            case 'obj':
+                loader = new OBJLoader();
+                break;
+            case 'gltf':
+            case 'glb':
+                loader = new GLTFLoader();
+                break;
+            case 'fbx':
+                loader = new FBXLoader();
+                break;
+            case 'stl':
+                loader = new STLLoader();
+                break;
+            case 'dae':
+                loader = new ColladaLoader();
+                break;
+            default:
+                console.error('Unsupported model format:', fileType);
+                setLoading(false);
+                return;
+        }
+
+        loader.load(
+            fileUrl,
+            (loadedModel) => {
+                let modelObject;
+
+                // Handle different loader output formats
+                if (fileType === 'gltf' || fileType === 'glb') {
+                    modelObject = loadedModel.scene;
+                } else if (fileType === 'dae') {
+                    modelObject = loadedModel.scene;
+                } else if (fileType === 'stl') {
+                    // STL only provides geometry, need to create mesh
+                    const geometry = loadedModel;
+                    const material = new THREE.MeshStandardMaterial({ color: 0xcccccc });
+                    modelObject = new THREE.Mesh(geometry, material);
+                } else {
+                    modelObject = loadedModel;
+                }
+
+                // Calculate bounding box and center the model
+                const box = new THREE.Box3().setFromObject(modelObject);
+                const center = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+                const scale = 2 / maxDim; // Scale to fit in a 2-unit box
+
+                modelObject.position.sub(center); // Center the model
+                modelObject.scale.setScalar(scale); // Scale to fit
+
+                setModel(modelObject);
+                setLoading(false);
+                if (onModelLoaded) onModelLoaded(modelObject);
+            },
+            (progress) => {
+                console.log('Loading progress:', (progress.loaded / progress.total) * 100 + '%');
+            },
+            (error) => {
+                console.error('Error loading model:', error);
+                setLoading(false);
+            }
+        );
+    }, [customModel?.file?.url, customModel?.file?.type]);
+
+    // Apply textures and material settings to the loaded model
+    useEffect(() => {
+        if (!model) return;
+
+        model.traverse((child) => {
+            if (child.isMesh) {
+                // Ensure geometry has normals
+                if (!child.geometry.attributes.normal) {
+                    child.geometry.computeVertexNormals();
+                }
+
+                // Apply render mode
+                if (renderMode === 'normal') {
+                    const normalMat = new THREE.MeshNormalMaterial({
+                        side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+                        flatShading: false,
+                    });
+                    child.material = normalMat;
+                } else if (renderMode === 'wireframe') {
+                    child.material = new THREE.MeshBasicMaterial({
+                        wireframe: true,
+                        color: 0x00aaff,
+                        side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+                    });
+                } else {
+                    // PBR mode - apply textures if available
+                    if (!child.material.isMeshStandardMaterial) {
+                        child.material = new THREE.MeshStandardMaterial({
+                            color: child.material.color || 0xcccccc,
+                            side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+                        });
+                    }
+
+                    // Load and apply textures
+                    const loader = new THREE.TextureLoader();
+                    if (textures.map) {
+                        loader.load(textures.map, (tex) => {
+                            tex.colorSpace = THREE.SRGBColorSpace;
+                            child.material.map = tex;
+                            child.material.needsUpdate = true;
+                        });
+                    }
+                    if (textures.normalMap) {
+                        loader.load(textures.normalMap, (tex) => {
+                            child.material.normalMap = tex;
+                            child.material.normalScale.set(settings.normalScale, settings.normalScale);
+                            child.material.needsUpdate = true;
+                        });
+                    }
+                    if (textures.roughnessMap) {
+                        loader.load(textures.roughnessMap, (tex) => {
+                            child.material.roughnessMap = tex;
+                            child.material.needsUpdate = true;
+                        });
+                    }
+                    if (textures.metalnessMap) {
+                        loader.load(textures.metalnessMap, (tex) => {
+                            child.material.metalnessMap = tex;
+                            child.material.needsUpdate = true;
+                        });
+                    }
+                    if (textures.displacementMap) {
+                        loader.load(textures.displacementMap, (tex) => {
+                            child.material.displacementMap = tex;
+                            child.material.displacementScale = settings.displacementScale;
+                            child.material.displacementBias = -settings.displacementScale / 2;
+                            child.material.needsUpdate = true;
+                        });
+                    }
+
+                    // Apply material settings
+                    child.material.roughness = settings.roughness;
+                    child.material.metalness = settings.metalness;
+                    child.material.side = settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
+                }
+                child.material.needsUpdate = true;
+            }
+        });
+    }, [model, renderMode, textures, settings]);
+
+    if (loading) {
+        return <mesh><boxGeometry args={[0.1, 0.1, 0.1]} /><meshBasicMaterial color="orange" /></mesh>;
+    }
+
+    if (!model) return null;
+
+    return <primitive object={model} ref={groupRef} />;
+};
+
+const ModelGroup = ({ geometryType, textures, settings, rotationBase, customModel, renderMode, onModelLoaded }) => {
     const groupRef = useRef();
     const autoRotRef = useRef(0);
 
@@ -151,7 +352,22 @@ const ModelGroup = ({ geometryType, textures, settings, rotationBase }) => {
 
     return (
         <group ref={groupRef} position={[0, 0, 0]}>
-            <PBRMesh textures={textures} geometryType={geometryType} settings={settings} />
+            {geometryType === 'Custom' && customModel?.file ? (
+                <CustomModel
+                    customModel={customModel}
+                    settings={settings}
+                    renderMode={renderMode}
+                    textures={textures}
+                    onModelLoaded={onModelLoaded}
+                />
+            ) : (
+                <PBRMesh
+                    textures={textures}
+                    geometryType={geometryType}
+                    settings={settings}
+                    renderMode={renderMode}
+                />
+            )}
         </group>
     );
 };
@@ -172,10 +388,13 @@ const HDRIEnvironment = ({ map, ext, background, intensity }) => {
 };
 
 const CustomEnvironment = ({ settings, preset }) => {
-    const { envMap, envMapExt, envIntensity, showEnvironment } = settings;
+    const { envMap, envMapExt, envIntensity, showEnvironment, showBackground } = settings;
+
+    // Don't show HDRI background if simple background is enabled
+    const showHDRIBackground = showEnvironment && !showBackground;
 
     if (envMap && (envMapExt === 'hdr' || envMapExt === 'exr')) {
-        return <HDRIEnvironment map={envMap} ext={envMapExt} background={showEnvironment} intensity={envIntensity} />;
+        return <HDRIEnvironment map={envMap} ext={envMapExt} background={showHDRIBackground} intensity={envIntensity} />;
     }
 
     // Fallback for standard images or presets
@@ -183,7 +402,7 @@ const CustomEnvironment = ({ settings, preset }) => {
         <Environment
             preset={envMap ? undefined : preset}
             files={envMap || undefined}
-            background={showEnvironment}
+            background={showHDRIBackground}
             environmentIntensity={envIntensity}
             blur={0.5}
         />
@@ -198,7 +417,9 @@ const CanvasHandle = ({ onReady }) => {
     return null;
 };
 
-const ViewerScene = ({ textures, geometryType = "Sphere", envPreset = "studio", bgColor = "#121212", settings, onCanvasReady }) => {
+// Removed: BackgroundImage component - now using CSS background instead
+
+const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMode = 'pbr', envPreset = "studio", bgColor = "#121212", settings, aspectRatio = 'free', transparentBg = false, onCanvasReady }) => {
     const rot = settings.modelRotation || { x: 0, y: 0, z: 0 };
     const rotRad = {
         x: (rot.x || 0) * Math.PI / 180,
@@ -206,17 +427,64 @@ const ViewerScene = ({ textures, geometryType = "Sphere", envPreset = "studio", 
         z: (rot.z || 0) * Math.PI / 180,
     };
 
+    // Aspect ratio mapping
+    const aspectRatioMap = {
+        'free': null,
+        '1:1': '1 / 1',
+        '16:9': '16 / 9',
+        '4:3': '4 / 3',
+        '9:16': '9 / 16',
+        '21:9': '21 / 9',
+    };
+
+    // Background image CSS mode mapping
+    const getBackgroundSize = () => {
+        if (!settings.backgroundImage || !settings.showBackground || transparentBg) return 'auto';
+        switch (settings.backgroundImageMode) {
+            case 'stretch': return '100% 100%';
+            case 'cover': return 'cover';
+            case 'contain': return 'contain';
+            default: return 'cover';
+        }
+    };
+
+    const outerContainerStyle = {
+        background: transparentBg ? 'transparent' : bgColor,
+    };
+
+    const containerStyle = {
+        background: transparentBg ? 'transparent' : bgColor,
+        ...(aspectRatioMap[aspectRatio] ? { aspectRatio: aspectRatioMap[aspectRatio] } : {}),
+        // Apply background image if enabled
+        ...(settings.backgroundImage && settings.showBackground && !transparentBg ? {
+            backgroundImage: `url(${settings.backgroundImage})`,
+            backgroundSize: getBackgroundSize(),
+            backgroundPosition: 'center',
+            backgroundRepeat: 'no-repeat',
+        } : {})
+    };
+
     return (
-        <div className="w-full h-full relative" style={{ background: bgColor }}>
-            <Canvas
-                shadows
-                gl={{ preserveDrawingBuffer: true }}
-                camera={{ position: [0, 0, 4], fov: 45 }}
-                onCreated={({ gl }) => {
-                    if (onCanvasReady) onCanvasReady(gl);
-                }}
-            >
+        <div className="w-full h-full flex items-center justify-center" style={outerContainerStyle}>
+            <div className="w-full" style={containerStyle}>
+                <Canvas
+                    shadows
+                    gl={{
+                        preserveDrawingBuffer: true,
+                        alpha: true, // Always enable alpha for canvas to show CSS background
+                        premultipliedAlpha: false,
+                    }}
+                    camera={{ position: [0, 0, 4], fov: 45 }}
+                    onCreated={({ gl, scene }) => {
+                        // Always set scene background to null to show CSS background
+                        scene.background = null;
+                        if (onCanvasReady) onCanvasReady(gl);
+                    }}
+                >
                 <CanvasHandle onReady={onCanvasReady} />
+
+                {/* Background image now handled via CSS - see container style */}
+
                 <React.Suspense fallback={null}>
                     <CustomEnvironment settings={settings} preset={envPreset} />
                 </React.Suspense>
@@ -230,7 +498,14 @@ const ViewerScene = ({ textures, geometryType = "Sphere", envPreset = "studio", 
                     castShadow
                 />
 
-                <ModelGroup geometryType={geometryType} textures={textures} settings={settings} rotationBase={rotRad} />
+                <ModelGroup
+                    geometryType={geometryType}
+                    textures={textures}
+                    settings={settings}
+                    rotationBase={rotRad}
+                    customModel={customModel}
+                    renderMode={renderMode}
+                />
 
                 <ContactShadows position={[0, -1.5, 0]} opacity={0.4} scale={10} blur={2.5} far={4} />
                 <OrbitControls
@@ -240,7 +515,8 @@ const ViewerScene = ({ textures, geometryType = "Sphere", envPreset = "studio", 
                     enableZoom={!settings.lockCamera}
                     enablePan={!settings.lockCamera}
                 />
-            </Canvas>
+                </Canvas>
+            </div>
         </div>
     );
 };
