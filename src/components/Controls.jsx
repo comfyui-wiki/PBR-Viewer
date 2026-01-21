@@ -687,6 +687,12 @@ const Controls = ({
                     />
                     <div className="mt-2 space-y-2">
                         <SliderControl
+                            label="Model Scale (Size)"
+                            value={settings.modelScale ?? 1.0}
+                            min={0.1} max={5.0} step={0.05}
+                            onChange={(v) => updateSetting('modelScale', v)}
+                        />
+                        <SliderControl
                             label="Model Rotation X (deg)"
                             value={settings.modelRotation?.x ?? 0}
                             min={-180} max={180} step={1}

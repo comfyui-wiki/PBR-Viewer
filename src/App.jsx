@@ -74,6 +74,7 @@ function App() {
     doubleSided: false,
     showShadows: false, // Show contact shadows (disabled by default)
     modelRotation: { x: 0, y: 0, z: 0 },
+    modelScale: 1.0, // Model scale factor (0.1 to 5.0)
     textureRepeat: { u: 1, v: 1, uniform: 1, linked: true },
     autoRotate: false,
     autoRotateSpeed: 0, // radians per second (negative = counterclockwise, positive = clockwise)
@@ -367,7 +368,7 @@ function App() {
         {dualViewMode ? (
           // Dual view layout
           <div className="flex w-full h-full">
-            <div className="flex-1 h-full border-r border-gray-700">
+            <div className="flex-1 h-full">
               <ViewerScene
                 textures={textures}
                 geometryType={geometry}

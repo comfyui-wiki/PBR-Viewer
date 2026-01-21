@@ -348,6 +348,10 @@ const ModelGroup = ({ geometryType, textures, settings, rotationBase, customMode
         groupRef.current.rotation.x = rotationBase.x;
         groupRef.current.rotation.y = rotationBase.y + autoRotRef.current;
         groupRef.current.rotation.z = rotationBase.z;
+
+        // Apply model scale
+        const scale = settings.modelScale || 1.0;
+        groupRef.current.scale.set(scale, scale, scale);
     });
 
     return (
