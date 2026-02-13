@@ -725,6 +725,18 @@ const Controls = ({
                         <span className="text-xs font-semibold uppercase tracking-wider">Material Settings</span>
                     </div>
 
+                    {/* Material Base Color */}
+                    <div className="mb-4">
+                        <label className="text-xs text-gray-500 mb-1 block">Material Color (when no texture)</label>
+                        <input
+                            type="color"
+                            value={settings.materialColor || '#cccccc'}
+                            onChange={(e) => updateSetting('materialColor', e.target.value)}
+                            className="w-full h-10 rounded cursor-pointer bg-gray-800 border border-gray-600"
+                        />
+                        <div className="mt-1 text-xs text-gray-500 font-mono">{settings.materialColor || '#cccccc'}</div>
+                    </div>
+
                     <SliderControl
                         label="Displacement Scale"
                         value={settings.displacementScale}

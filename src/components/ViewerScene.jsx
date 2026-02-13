@@ -147,6 +147,7 @@ const PBRMesh = ({ textures, geometryType, settings, renderMode = 'pbr' }) => {
         Material = (
             <meshStandardMaterial
                 ref={materialRef}
+                color={settings.materialColor || '#cccccc'}
                 displacementScale={settings.displacementScale}
                 displacementBias={-settings.displacementScale / 2}
                 normalScale={[settings.normalScale, settings.normalScale]}
@@ -274,10 +275,35 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                 } else {
                     // PBR mode - apply textures if available
                     if (!child.material.isMeshStandardMaterial) {
+                        // Preserve original material properties when converting to MeshStandardMaterial
+                        const oldMaterial = child.material;
+                        const baseColor = oldMaterial.color || new THREE.Color(settings.materialColor || 0xcccccc);
+
                         child.material = new THREE.MeshStandardMaterial({
-                            color: child.material.color || 0xcccccc,
+                            color: baseColor,
                             side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+                            // Preserve textures from original material
+                            map: oldMaterial.map || null,
+                            normalMap: oldMaterial.normalMap || null,
+                            roughnessMap: oldMaterial.roughnessMap || null,
+                            metalnessMap: oldMaterial.metalnessMap || null,
+                            emissiveMap: oldMaterial.emissiveMap || null,
+                            emissive: oldMaterial.emissive || new THREE.Color(0x000000),
+                            aoMap: oldMaterial.aoMap || null,
+                            alphaMap: oldMaterial.alphaMap || null,
+                            lightMap: oldMaterial.lightMap || null,
+                            // Preserve other properties
+                            opacity: oldMaterial.opacity !== undefined ? oldMaterial.opacity : 1,
+                            transparent: oldMaterial.transparent || false,
                         });
+
+                        // Dispose old material to free memory
+                        if (oldMaterial.dispose) oldMaterial.dispose();
+                    } else {
+                        // If already MeshStandardMaterial, update color if no texture is loaded
+                        if (!textures.map && settings.materialColor) {
+                            child.material.color = new THREE.Color(settings.materialColor);
+                        }
                     }
 
                     // Load and apply textures
@@ -434,16 +460,19 @@ const BackgroundPlane = ({ imageUrl, color, show, mode = 'cover' }) => {
             return;
         }
 
+        console.log('BackgroundPlane: Loading texture from', imageUrl);
         const loader = new THREE.TextureLoader();
         loader.load(
             imageUrl,
             (loadedTexture) => {
                 loadedTexture.colorSpace = THREE.SRGBColorSpace;
+                console.log('BackgroundPlane: Texture loaded successfully', loadedTexture);
                 setTexture(loadedTexture);
             },
             undefined,
             (error) => {
-                console.error('Error loading background image:', error);
+                console.error('BackgroundPlane: Error loading background image:', error);
+                setTexture(null);
             }
         );
     }, [imageUrl, show]);
@@ -500,7 +529,9 @@ const BackgroundPlane = ({ imageUrl, color, show, mode = 'cover' }) => {
         meshRef.current.scale.set(finalWidth, finalHeight, 1);
     });
 
+    // Don't render if not showing, or if we need a texture but don't have one yet
     if (!show) return null;
+    if (imageUrl && !texture) return null; // Wait for texture to load
 
     return (
         <mesh ref={meshRef} renderOrder={-999}>

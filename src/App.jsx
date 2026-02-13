@@ -54,8 +54,9 @@ function App() {
   const [settings, setSettings] = useState({
     displacementScale: 0.02,
     normalScale: 1,
-    roughness: 1, // Multiply factor
-    metalness: 1, // Multiply factor
+    roughness: 0.8, // Multiply factor (reduced from 1 for better visibility)
+    metalness: 0.2, // Multiply factor (reduced from 1 to show color better)
+    materialColor: '#cccccc', // Base material color when no texture is loaded
     envIntensity: 1,
     showEnvironment: false,
     envMap: null,
