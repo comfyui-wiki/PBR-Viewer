@@ -254,6 +254,12 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
 
         model.traverse((child) => {
             if (child.isMesh) {
+                // Debug: Log material info
+                console.log('Mesh:', child.name || 'unnamed',
+                           'Material type:', child.material?.type,
+                           'Has map:', !!child.material?.map,
+                           'Color:', child.material?.color);
+
                 // Ensure geometry has normals
                 if (!child.geometry.attributes.normal) {
                     child.geometry.computeVertexNormals();
@@ -279,7 +285,14 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                         const oldMaterial = child.material;
                         const baseColor = oldMaterial.color || new THREE.Color(settings.materialColor || 0xcccccc);
 
-                        child.material = new THREE.MeshStandardMaterial({
+                        console.log('Converting material:', {
+                            oldType: oldMaterial.type,
+                            hasMap: !!oldMaterial.map,
+                            mapImage: oldMaterial.map?.image,
+                            mapSource: oldMaterial.map?.source
+                        });
+
+                        const newMaterial = new THREE.MeshStandardMaterial({
                             color: baseColor,
                             side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
                             // Preserve textures from original material
@@ -296,6 +309,14 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                             opacity: oldMaterial.opacity !== undefined ? oldMaterial.opacity : 1,
                             transparent: oldMaterial.transparent || false,
                         });
+
+                        console.log('New material created:', {
+                            type: newMaterial.type,
+                            hasMap: !!newMaterial.map,
+                            mapImage: newMaterial.map?.image
+                        });
+
+                        child.material = newMaterial;
 
                         // Dispose old material to free memory
                         if (oldMaterial.dispose) oldMaterial.dispose();
