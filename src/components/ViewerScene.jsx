@@ -650,7 +650,7 @@ const BackgroundPlane = ({ imageUrl, color, show, mode = 'cover', overlaySetting
                 softness: { value: overlaySettings?.backgroundOverlaySoftness ?? 0.55 },
             },
             transparent: true,
-            depthTest: false,
+            depthTest: true,
             depthWrite: false,
             toneMapped: false,
         });
@@ -694,18 +694,18 @@ const BackgroundPlane = ({ imageUrl, color, show, mode = 'cover', overlaySetting
 
     return (
         <>
-            <mesh ref={bgMeshRef} renderOrder={-999}>
+            <mesh ref={bgMeshRef} renderOrder={-2}>
                 <planeGeometry args={[1, 1]} />
                 <meshBasicMaterial
                     map={texture || null}
                     color={color || '#ffffff'}
-                    depthTest={false}
-                    depthWrite={false}
+                    depthTest={true}
+                    depthWrite={true}
                     toneMapped={false}
                 />
             </mesh>
             {showOverlay && overlayMaterial && (
-                <mesh ref={overlayMeshRef} renderOrder={-998} material={overlayMaterial}>
+                <mesh ref={overlayMeshRef} renderOrder={-1} material={overlayMaterial}>
                     <planeGeometry args={[1, 1]} />
                 </mesh>
             )}
