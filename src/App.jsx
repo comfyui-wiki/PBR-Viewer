@@ -65,6 +65,11 @@ function App() {
     backgroundColor: '#1a1a1a', // Solid color background
     backgroundType: 'none', // 'none', 'color', 'image'
     backgroundImageMode: 'cover', // 'stretch', 'cover', 'contain'
+    backgroundOverlayMode: 'none', // 'none', 'uniform', 'gradient'
+    backgroundOverlayOpacity: 0.45,
+    backgroundOverlayColor: '#000000',
+    backgroundOverlayGradient: 'bottom', // 'top', 'bottom', 'left', 'right', 'vignette'
+    backgroundOverlaySoftness: 0.55,
     ambientIntensity: 0.5,
     spotIntensity: 1,
     spotAngle: 0.2,

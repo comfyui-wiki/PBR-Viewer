@@ -502,104 +502,248 @@ const CanvasHandle = ({ onReady }) => {
     return null;
 };
 
-// Background plane that follows camera (for recording)
-const BackgroundPlane = ({ imageUrl, color, show, mode = 'cover' }) => {
+const GRADIENT_TYPE = {
+    uniform: 0,
+    top: 1,
+    bottom: 2,
+    left: 3,
+    right: 4,
+    vignette: 5,
+};
+
+const backgroundOverlayVertexShader = `
+varying vec2 vUv;
+void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+const backgroundOverlayFragmentShader = `
+uniform float opacity;
+uniform vec3 overlayColor;
+uniform int gradientType;
+uniform float softness;
+varying vec2 vUv;
+
+void main() {
+    float alpha = opacity;
+    float edge = clamp(softness, 0.02, 1.0);
+
+    if (gradientType == 1) {
+        alpha *= smoothstep(1.0 - edge, 1.0, vUv.y);
+    } else if (gradientType == 2) {
+        alpha *= smoothstep(edge, 0.0, vUv.y);
+    } else if (gradientType == 3) {
+        alpha *= smoothstep(1.0 - edge, 1.0, vUv.x);
+    } else if (gradientType == 4) {
+        alpha *= smoothstep(edge, 0.0, vUv.x);
+    } else if (gradientType == 5) {
+        float d = distance(vUv, vec2(0.5));
+        alpha *= smoothstep(0.22, 0.5 + edge * 0.35, d);
+    }
+
+    if (alpha <= 0.001) discard;
+    gl_FragColor = vec4(overlayColor, alpha);
+}
+`;
+
+const syncBackgroundPlane = (mesh, camera, size, { texture, color, mode }) => {
+    if (!mesh || !camera) return;
+
+    const distance = 15;
+    const direction = new THREE.Vector3(0, 0, -1);
+    direction.applyQuaternion(camera.quaternion);
+
+    const position = camera.position.clone().add(direction.multiplyScalar(distance));
+    mesh.position.copy(position);
+    mesh.quaternion.copy(camera.quaternion);
+
+    const canvasAspect = size.width / size.height;
+    const vFov = camera.fov * Math.PI / 180;
+    const planeHeight = 2 * Math.tan(vFov / 2) * distance;
+    const planeWidth = planeHeight * canvasAspect;
+
+    let finalWidth = planeWidth;
+    let finalHeight = planeHeight;
+
+    if (color || mode === 'stretch') {
+        finalWidth = planeWidth;
+        finalHeight = planeHeight;
+    } else if (texture?.image) {
+        const imageAspect = texture.image.width / texture.image.height;
+
+        if (mode === 'cover') {
+            if (canvasAspect > imageAspect) {
+                finalWidth = planeWidth;
+                finalHeight = finalWidth / imageAspect;
+            } else {
+                finalHeight = planeHeight;
+                finalWidth = finalHeight * imageAspect;
+            }
+        } else if (mode === 'contain') {
+            if (canvasAspect > imageAspect) {
+                finalHeight = planeHeight;
+                finalWidth = finalHeight * imageAspect;
+            } else {
+                finalWidth = planeWidth;
+                finalHeight = finalWidth / imageAspect;
+            }
+        }
+    }
+
+    mesh.scale.set(finalWidth, finalHeight, 1);
+};
+
+// Background plane + optional darken / gradient overlay (included in canvas export)
+const BackgroundPlane = ({ imageUrl, color, show, mode = 'cover', overlaySettings }) => {
     const { camera, size } = useThree();
     const [texture, setTexture] = useState(null);
-    const meshRef = useRef();
+    const bgMeshRef = useRef();
+    const overlayMeshRef = useRef();
+    const [overlayMaterial, setOverlayMaterial] = useState(null);
 
-    // Load texture if image URL provided
+    const overlayMode = overlaySettings?.backgroundOverlayMode ?? 'none';
+    const showOverlay =
+        overlayMode === 'uniform' || overlayMode === 'gradient';
+
     useEffect(() => {
         if (!show || !imageUrl) {
             setTexture(null);
             return;
         }
 
-        console.log('BackgroundPlane: Loading texture from', imageUrl);
         const loader = new THREE.TextureLoader();
         loader.load(
             imageUrl,
             (loadedTexture) => {
                 loadedTexture.colorSpace = THREE.SRGBColorSpace;
-                console.log('BackgroundPlane: Texture loaded successfully', loadedTexture);
                 setTexture(loadedTexture);
             },
             undefined,
-            (error) => {
-                console.error('BackgroundPlane: Error loading background image:', error);
-                setTexture(null);
-            }
+            () => setTexture(null)
         );
     }, [imageUrl, show]);
 
-    // Update plane position and size every frame to follow camera
-    useFrame(() => {
-        if (!meshRef.current || !camera) return;
-
-        // Position plane behind camera
-        const distance = 15; // Distance behind camera
-        const direction = new THREE.Vector3(0, 0, -1);
-        direction.applyQuaternion(camera.quaternion);
-
-        const position = camera.position.clone().add(direction.multiplyScalar(distance));
-        meshRef.current.position.copy(position);
-        meshRef.current.quaternion.copy(camera.quaternion);
-
-        // Calculate plane size based on camera FOV
-        const canvasAspect = size.width / size.height;
-
-        const vFov = camera.fov * Math.PI / 180;
-        const planeHeight = 2 * Math.tan(vFov / 2) * distance;
-        const planeWidth = planeHeight * canvasAspect;
-
-        let finalWidth = planeWidth;
-        let finalHeight = planeHeight;
-
-        if (color || mode === 'stretch') {
-            // For solid color or stretch mode, fill the entire view
-            finalWidth = planeWidth;
-            finalHeight = planeHeight;
-        } else if (texture) {
-            const imageAspect = texture.image.width / texture.image.height;
-
-            if (mode === 'cover') {
-                if (canvasAspect > imageAspect) {
-                    finalWidth = planeWidth;
-                    finalHeight = finalWidth / imageAspect;
-                } else {
-                    finalHeight = planeHeight;
-                    finalWidth = finalHeight * imageAspect;
-                }
-            } else if (mode === 'contain') {
-                if (canvasAspect > imageAspect) {
-                    finalHeight = planeHeight;
-                    finalWidth = finalHeight * imageAspect;
-                } else {
-                    finalWidth = planeWidth;
-                    finalHeight = finalWidth / imageAspect;
-                }
-            }
+    useEffect(() => {
+        if (!showOverlay) {
+            setOverlayMaterial((prev) => {
+                if (prev) prev.dispose();
+                return null;
+            });
+            return;
         }
 
-        meshRef.current.scale.set(finalWidth, finalHeight, 1);
+        const color = new THREE.Color(overlaySettings?.backgroundOverlayColor ?? '#000000');
+        const gradientKey =
+            overlayMode === 'gradient'
+                ? (overlaySettings?.backgroundOverlayGradient ?? 'bottom')
+                : 'uniform';
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader: backgroundOverlayVertexShader,
+            fragmentShader: backgroundOverlayFragmentShader,
+            uniforms: {
+                opacity: { value: overlaySettings?.backgroundOverlayOpacity ?? 0.45 },
+                overlayColor: { value: color },
+                gradientType: { value: GRADIENT_TYPE[gradientKey] ?? 0 },
+                softness: { value: overlaySettings?.backgroundOverlaySoftness ?? 0.55 },
+            },
+            transparent: true,
+            depthTest: false,
+            depthWrite: false,
+            toneMapped: false,
+        });
+
+        setOverlayMaterial((prev) => {
+            if (prev) prev.dispose();
+            return material;
+        });
+    }, [
+        showOverlay,
+        overlayMode,
+        overlaySettings?.backgroundOverlayColor,
+        overlaySettings?.backgroundOverlayGradient,
+    ]);
+
+    useEffect(() => {
+        if (!overlayMaterial) return;
+
+        overlayMaterial.uniforms.opacity.value = overlaySettings?.backgroundOverlayOpacity ?? 0.45;
+        overlayMaterial.uniforms.overlayColor.value.set(overlaySettings?.backgroundOverlayColor ?? '#000000');
+        overlayMaterial.uniforms.softness.value = overlaySettings?.backgroundOverlaySoftness ?? 0.55;
+
+        const gradientKey =
+            overlayMode === 'gradient'
+                ? (overlaySettings?.backgroundOverlayGradient ?? 'bottom')
+                : 'uniform';
+        overlayMaterial.uniforms.gradientType.value = GRADIENT_TYPE[gradientKey] ?? 0;
+    }, [overlayMaterial, overlaySettings, overlayMode]);
+
+    useFrame(() => {
+        if (!camera) return;
+        const planeState = { texture, color, mode };
+        syncBackgroundPlane(bgMeshRef.current, camera, size, planeState);
+        if (showOverlay) {
+            syncBackgroundPlane(overlayMeshRef.current, camera, size, planeState);
+        }
     });
 
-    // Don't render if not showing, or if we need a texture but don't have one yet
     if (!show) return null;
-    if (imageUrl && !texture) return null; // Wait for texture to load
+    if (imageUrl && !texture) return null;
 
     return (
-        <mesh ref={meshRef} renderOrder={-999}>
-            <planeGeometry args={[1, 1]} />
-            <meshBasicMaterial
-                map={texture || null}
-                color={color || '#ffffff'}
-                depthTest={false}
-                depthWrite={false}
-                toneMapped={false}
-            />
-        </mesh>
+        <>
+            <mesh ref={bgMeshRef} renderOrder={-999}>
+                <planeGeometry args={[1, 1]} />
+                <meshBasicMaterial
+                    map={texture || null}
+                    color={color || '#ffffff'}
+                    depthTest={false}
+                    depthWrite={false}
+                    toneMapped={false}
+                />
+            </mesh>
+            {showOverlay && overlayMaterial && (
+                <mesh ref={overlayMeshRef} renderOrder={-998} material={overlayMaterial}>
+                    <planeGeometry args={[1, 1]} />
+                </mesh>
+            )}
+        </>
     );
+};
+
+const getBackgroundOverlayCss = (settings) => {
+    const mode = settings.backgroundOverlayMode ?? 'none';
+    if (mode === 'none' || settings.backgroundType !== 'image' || !settings.backgroundImage) {
+        return null;
+    }
+
+    const color = settings.backgroundOverlayColor ?? '#000000';
+    const opacity = settings.backgroundOverlayOpacity ?? 0.45;
+    const soft = Math.round((settings.backgroundOverlaySoftness ?? 0.55) * 100);
+    const rgba = (a) => {
+        const hex = color.replace('#', '');
+        const r = parseInt(hex.slice(0, 2), 16);
+        const g = parseInt(hex.slice(2, 4), 16);
+        const b = parseInt(hex.slice(4, 6), 16);
+        return `rgba(${r},${g},${b},${a})`;
+    };
+
+    if (mode === 'uniform') {
+        return rgba(opacity);
+    }
+
+    const grad = settings.backgroundOverlayGradient ?? 'bottom';
+    const edge = `${100 - soft}%`;
+    const maps = {
+        top: `linear-gradient(to bottom, ${rgba(opacity)} 0%, transparent ${edge})`,
+        bottom: `linear-gradient(to top, ${rgba(opacity)} 0%, transparent ${edge})`,
+        left: `linear-gradient(to right, ${rgba(opacity)} 0%, transparent ${edge})`,
+        right: `linear-gradient(to left, ${rgba(opacity)} 0%, transparent ${edge})`,
+        vignette: `radial-gradient(ellipse at center, transparent ${edge}, ${rgba(opacity)} 100%)`,
+    };
+    return maps[grad] ?? maps.bottom;
 };
 
 // Camera sync component for syncing cameras between dual views
@@ -661,14 +805,21 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
                    settings.backgroundType === 'color' ? settings.backgroundColor : bgColor,
     };
 
+    const overlayCss = getBackgroundOverlayCss(settings);
+    const hasImageBackground =
+        settings.backgroundImage && settings.backgroundType === 'image' && !transparentBg;
+
     const containerStyle = {
         background: transparentBg ? 'transparent' :
                    settings.backgroundType === 'color' ? settings.backgroundColor : bgColor,
         ...(aspectRatioMap[aspectRatio] ? { aspectRatio: aspectRatioMap[aspectRatio] } : {}),
-        // Apply background image if enabled
-        ...(settings.backgroundImage && settings.backgroundType === 'image' && !transparentBg ? {
-            backgroundImage: `url(${settings.backgroundImage})`,
-            backgroundSize: getBackgroundSize(),
+        ...(hasImageBackground ? {
+            backgroundImage: overlayCss
+                ? `${overlayCss}, url(${settings.backgroundImage})`
+                : `url(${settings.backgroundImage})`,
+            backgroundSize: overlayCss
+                ? `${getBackgroundSize()}, ${getBackgroundSize()}`
+                : getBackgroundSize(),
             backgroundPosition: 'center',
             backgroundRepeat: 'no-repeat',
         } : {})
@@ -676,7 +827,7 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
 
     return (
         <div className="w-full h-full flex items-center justify-center" style={outerContainerStyle}>
-            <div className="w-full" style={containerStyle}>
+            <div className="w-full relative" style={containerStyle}>
                 <Canvas
                     shadows
                     dpr={1}
@@ -719,6 +870,7 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
                         imageUrl={settings.backgroundImage}
                         show={true}
                         mode={settings.backgroundImageMode}
+                        overlaySettings={settings}
                     />
                 )}
                 {!transparentBg && settings.backgroundType === 'color' && (

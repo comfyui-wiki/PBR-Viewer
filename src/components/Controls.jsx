@@ -600,6 +600,94 @@ const Controls = ({
                                         </div>
                                     </div>
                                 )}
+
+                                {settings.backgroundImage && (
+                                    <div className="mt-4 pt-3 border-t border-white/10">
+                                        <label className="text-xs text-gray-500 mb-2 block">Background Overlay</label>
+                                        <div className="grid grid-cols-3 gap-2 mb-3">
+                                            {[
+                                                { id: 'none', label: 'Off' },
+                                                { id: 'uniform', label: 'Dim' },
+                                                { id: 'gradient', label: 'Gradient' },
+                                            ].map((item) => (
+                                                <button
+                                                    key={item.id}
+                                                    type="button"
+                                                    onClick={() => updateSetting('backgroundOverlayMode', item.id)}
+                                                    className={`
+                                                        py-1.5 px-2 rounded text-xs font-medium transition-all
+                                                        ${settings.backgroundOverlayMode === item.id
+                                                            ? 'bg-blue-600 text-white'
+                                                            : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                                                        }
+                                                    `}
+                                                >
+                                                    {item.label}
+                                                </button>
+                                            ))}
+                                        </div>
+
+                                        {settings.backgroundOverlayMode !== 'none' && (
+                                            <>
+                                                <SliderControl
+                                                    label="Overlay Strength"
+                                                    value={settings.backgroundOverlayOpacity ?? 0.45}
+                                                    min={0}
+                                                    max={1}
+                                                    step={0.01}
+                                                    onChange={(v) => updateSetting('backgroundOverlayOpacity', v)}
+                                                />
+                                                <div className="mb-3">
+                                                    <label className="text-xs text-gray-500 mb-1 block">Overlay Color</label>
+                                                    <input
+                                                        type="color"
+                                                        value={settings.backgroundOverlayColor ?? '#000000'}
+                                                        onChange={(e) => updateSetting('backgroundOverlayColor', e.target.value)}
+                                                        className="w-full h-8 rounded cursor-pointer bg-gray-800 border border-gray-600"
+                                                    />
+                                                </div>
+
+                                                {settings.backgroundOverlayMode === 'gradient' && (
+                                                    <>
+                                                        <label className="text-xs text-gray-500 mb-1 block">Gradient Direction</label>
+                                                        <div className="grid grid-cols-3 gap-2 mb-3">
+                                                            {[
+                                                                { id: 'top', label: 'Top' },
+                                                                { id: 'bottom', label: 'Bottom' },
+                                                                { id: 'left', label: 'Left' },
+                                                                { id: 'right', label: 'Right' },
+                                                                { id: 'vignette', label: 'Vignette' },
+                                                            ].map((item) => (
+                                                                <button
+                                                                    key={item.id}
+                                                                    type="button"
+                                                                    onClick={() => updateSetting('backgroundOverlayGradient', item.id)}
+                                                                    className={`
+                                                                        py-1.5 px-2 rounded text-xs font-medium transition-all
+                                                                        ${settings.backgroundOverlayGradient === item.id
+                                                                            ? 'bg-blue-600 text-white'
+                                                                            : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                                                                        }
+                                                                    `}
+                                                                >
+                                                                    {item.label}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                        <SliderControl
+                                                            label="Gradient Softness"
+                                                            value={settings.backgroundOverlaySoftness ?? 0.55}
+                                                            min={0.05}
+                                                            max={1}
+                                                            step={0.01}
+                                                            onChange={(v) => updateSetting('backgroundOverlaySoftness', v)}
+                                                        />
+                                                    </>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
+                                )}
                             </>
                         )}
                     </div>
