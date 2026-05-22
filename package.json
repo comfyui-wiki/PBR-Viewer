@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:pages": "VITE_BASE_PATH=/PBR-Viewer/ vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "preview:pages": "VITE_BASE_PATH=/PBR-Viewer/ vite preview"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",

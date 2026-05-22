@@ -81,6 +81,21 @@ npm run build
 npm run preview
 ```
 
+### GitHub Pages
+
+Live demo: **https://comfyui-wiki.github.io/PBR-Viewer/**
+
+Pushes to `main` deploy automatically via GitHub Actions (`.github/workflows/deploy-pages.yml`).
+
+In the repository, enable **Settings → Pages → Build and deployment → Source: GitHub Actions** if it is not already enabled.
+
+Local build matching the Pages URL base:
+
+```bash
+pnpm build:pages
+pnpm preview:pages
+```
+
 ## How to Use
 
 1. **Upload Textures** - Click on texture slots to upload corresponding PBR textures
