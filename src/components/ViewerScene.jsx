@@ -166,6 +166,39 @@ const PBRMesh = ({ textures, geometryType, settings, renderMode = 'pbr' }) => {
     );
 };
 
+/** Rodin basic_shaded: baked color in emissiveTexture, black base, no baseColor map */
+const isEmissiveBakeMaterial = (material) => {
+    if (!material?.emissiveMap) return false;
+    if (material.map) return false;
+    const c = material.color;
+    const luminance = c ? c.r + c.g + c.b : 0;
+    return luminance < 0.15;
+};
+
+const createEmissiveBakeMaterial = (source, settings) => {
+    const side = settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
+    const tex = source.emissiveMap;
+    if (tex) tex.colorSpace = THREE.SRGBColorSpace;
+
+    const mat = new THREE.MeshBasicMaterial({
+        map: tex,
+        side,
+        transparent: source.transparent ?? false,
+        opacity: source.opacity ?? 1,
+    });
+    mat.userData.isEmissiveBake = true;
+    return mat;
+};
+
+const disposeMaterial = (material) => {
+    if (!material) return;
+    if (Array.isArray(material)) {
+        material.forEach(disposeMaterial);
+        return;
+    }
+    if (material.dispose) material.dispose();
+};
+
 // Component for loading and displaying custom 3D models
 const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoaded }) => {
     const [model, setModel] = useState(null);
@@ -254,12 +287,6 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
 
         model.traverse((child) => {
             if (child.isMesh) {
-                // Debug: Log material info
-                console.log('Mesh:', child.name || 'unnamed',
-                           'Material type:', child.material?.type,
-                           'Has map:', !!child.material?.map,
-                           'Color:', child.material?.color);
-
                 // Ensure geometry has normals
                 if (!child.geometry.attributes.normal) {
                     child.geometry.computeVertexNormals();
@@ -279,23 +306,35 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                         side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
                     });
                 } else {
-                    // PBR mode - apply textures if available
-                    if (!child.material.isMeshStandardMaterial) {
-                        // Preserve original material properties when converting to MeshStandardMaterial
-                        const oldMaterial = child.material;
-                        const baseColor = oldMaterial.color || new THREE.Color(settings.materialColor || 0xcccccc);
+                    const oldMaterial = child.material;
+                    const side = settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
+                    const useViewerTextures = !!(
+                        textures.map ||
+                        textures.normalMap ||
+                        textures.roughnessMap ||
+                        textures.metalnessMap ||
+                        textures.displacementMap
+                    );
 
-                        console.log('Converting material:', {
-                            oldType: oldMaterial.type,
-                            hasMap: !!oldMaterial.map,
-                            mapImage: oldMaterial.map?.image,
-                            mapSource: oldMaterial.map?.source
-                        });
+                    // Baked preview (e.g. Rodin base_basic_shaded): unlit display unless user uploads PBR maps
+                    if (!useViewerTextures && isEmissiveBakeMaterial(oldMaterial)) {
+                        if (!child.material.userData?.isEmissiveBake) {
+                            disposeMaterial(oldMaterial);
+                            child.material = createEmissiveBakeMaterial(oldMaterial, settings);
+                        } else {
+                            child.material.side = side;
+                        }
+                        child.material.needsUpdate = true;
+                        return;
+                    }
+
+                    // Standard PBR path
+                    if (!child.material.isMeshStandardMaterial && !child.material.isMeshPhysicalMaterial) {
+                        const baseColor = oldMaterial.color || new THREE.Color(settings.materialColor || 0xcccccc);
 
                         const newMaterial = new THREE.MeshStandardMaterial({
                             color: baseColor,
-                            side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
-                            // Preserve textures from original material
+                            side,
                             map: oldMaterial.map || null,
                             normalMap: oldMaterial.normalMap || null,
                             roughnessMap: oldMaterial.roughnessMap || null,
@@ -305,29 +344,21 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                             aoMap: oldMaterial.aoMap || null,
                             alphaMap: oldMaterial.alphaMap || null,
                             lightMap: oldMaterial.lightMap || null,
-                            // Preserve other properties
                             opacity: oldMaterial.opacity !== undefined ? oldMaterial.opacity : 1,
                             transparent: oldMaterial.transparent || false,
+                            roughness: oldMaterial.roughness ?? settings.roughness,
+                            metalness: oldMaterial.metalness ?? settings.metalness,
                         });
 
-                        console.log('New material created:', {
-                            type: newMaterial.type,
-                            hasMap: !!newMaterial.map,
-                            mapImage: newMaterial.map?.image
-                        });
-
+                        disposeMaterial(oldMaterial);
                         child.material = newMaterial;
-
-                        // Dispose old material to free memory
-                        if (oldMaterial.dispose) oldMaterial.dispose();
                     } else {
-                        // If already MeshStandardMaterial, update color if no texture is loaded
-                        if (!textures.map && settings.materialColor) {
+                        const hasModelBaseMap = !!child.material.map;
+                        if (!textures.map && !hasModelBaseMap && settings.materialColor) {
                             child.material.color = new THREE.Color(settings.materialColor);
                         }
                     }
 
-                    // Load and apply textures
                     const loader = new THREE.TextureLoader();
                     if (textures.map) {
                         loader.load(textures.map, (tex) => {
@@ -336,7 +367,7 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                             child.material.needsUpdate = true;
                         });
                     }
-                    if (textures.normalMap) {
+                    if (textures.normalMap && child.material.normalScale) {
                         loader.load(textures.normalMap, (tex) => {
                             child.material.normalMap = tex;
                             child.material.normalScale.set(settings.normalScale, settings.normalScale);
@@ -355,7 +386,7 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                             child.material.needsUpdate = true;
                         });
                     }
-                    if (textures.displacementMap) {
+                    if (textures.displacementMap && 'displacementScale' in child.material) {
                         loader.load(textures.displacementMap, (tex) => {
                             child.material.displacementMap = tex;
                             child.material.displacementScale = settings.displacementScale;
@@ -364,10 +395,13 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                         });
                     }
 
-                    // Apply material settings
-                    child.material.roughness = settings.roughness;
-                    child.material.metalness = settings.metalness;
-                    child.material.side = settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
+                    if ('roughness' in child.material) {
+                        child.material.roughness = settings.roughness;
+                    }
+                    if ('metalness' in child.material) {
+                        child.material.metalness = settings.metalness;
+                    }
+                    child.material.side = side;
                 }
                 child.material.needsUpdate = true;
             }
