@@ -967,11 +967,18 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
             <div className={innerClass} style={containerStyle}>
                 <Canvas
                     shadows
-                    dpr={1}
+                    // Cap DPR at 2 so Retina displays render crisp without paying 3x on
+                    // phones. The previous hard-coded dpr={1} blurred every pixel on
+                    // high-density screens.
+                    dpr={[1, 2]}
                     gl={{
                         preserveDrawingBuffer: true,
-                        alpha: transparentBg, // Enable alpha only for transparent background
+                        alpha: transparentBg,
                         premultipliedAlpha: false,
+                        antialias: true,
+                        toneMapping: THREE.ACESFilmicToneMapping,
+                        toneMappingExposure: 1.0,
+                        outputColorSpace: THREE.SRGBColorSpace,
                     }}
                     camera={{ position: [0, 0, 4], fov: 45 }}
                     onCreated={({ gl, scene }) => {
@@ -1023,12 +1030,19 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
                 </React.Suspense>
 
                 <ambientLight intensity={settings.ambientIntensity} />
+                {/* Closer + brighter than the previous (10,10,10) so the spot
+                    actually illuminates the model — at that distance with the
+                    default narrow angle, almost no light reached it. */}
                 <spotLight
-                    position={[10, 10, 10]}
+                    position={[4, 5, 3]}
                     angle={settings.spotAngle}
                     penumbra={settings.spotPenumbra}
-                    intensity={settings.spotIntensity}
+                    intensity={settings.spotIntensity * 30}
+                    distance={20}
+                    decay={1.5}
                     castShadow
+                    shadow-mapSize-width={1024}
+                    shadow-mapSize-height={1024}
                 />
 
                 <ModelGroup
