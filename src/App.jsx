@@ -1,9 +1,84 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ViewerScene from './components/ViewerScene';
 import Controls from './components/Controls';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import './index.css';
+
+// Defaults tuned so the viewer shows recognizable PBR shading on first load:
+// medium metalness + medium-low roughness produces visible specular + reflections
+// against the default `city` environment preset.
+const DEFAULT_SETTINGS = {
+  displacementScale: 0.02,
+  normalScale: 1,
+  roughness: 0.35,
+  metalness: 0.6,
+  materialColor: '#cccccc',
+  envIntensity: 1.2,
+  showEnvironment: false,
+  envMap: null,
+  envMapExt: null,
+  backgroundImage: null,
+  backgroundColor: '#1a1a1a',
+  backgroundType: 'none',
+  backgroundImageMode: 'cover',
+  backgroundOverlayMode: 'none',
+  backgroundOverlayOpacity: 0.45,
+  backgroundOverlayColor: '#000000',
+  backgroundOverlayGradient: 'bottom',
+  backgroundOverlaySoftness: 0.55,
+  ambientIntensity: 0.4,
+  spotIntensity: 1,
+  spotAngle: 0.2,
+  spotPenumbra: 0.8,
+  fresnelStrength: 0.15,
+  fresnelPower: 3,
+  lockCamera: false,
+  doubleSided: false,
+  showShadows: false,
+  modelRotation: { x: 0, y: 0, z: 0 },
+  modelScale: 1.0,
+  textureRepeat: { u: 1, v: 1, uniform: 1, linked: true },
+  autoRotate: false,
+  autoRotateSpeed: 0,
+};
+
+const SETTINGS_STORAGE_KEY = 'pbr-viewer:settings:v1';
+
+// Only persist settings that are safe across sessions. We deliberately drop
+// blob:// URLs (envMap, backgroundImage) because they don't survive a reload.
+const PERSISTED_KEYS = [
+  'displacementScale', 'normalScale', 'roughness', 'metalness', 'materialColor',
+  'envIntensity', 'showEnvironment', 'backgroundColor', 'backgroundType',
+  'backgroundImageMode', 'backgroundOverlayMode', 'backgroundOverlayOpacity',
+  'backgroundOverlayColor', 'backgroundOverlayGradient', 'backgroundOverlaySoftness',
+  'ambientIntensity', 'spotIntensity', 'spotAngle', 'spotPenumbra',
+  'fresnelStrength', 'fresnelPower', 'lockCamera', 'doubleSided', 'showShadows',
+  'modelRotation', 'modelScale', 'textureRepeat', 'autoRotate', 'autoRotateSpeed',
+];
+
+const loadSavedSettings = () => {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return { ...DEFAULT_SETTINGS, ...parsed };
+  } catch {
+    return null;
+  }
+};
+
+const saveSettings = (settings) => {
+  try {
+    const subset = {};
+    for (const key of PERSISTED_KEYS) {
+      if (settings[key] !== undefined) subset[key] = settings[key];
+    }
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(subset));
+  } catch {
+    // localStorage quota / disabled — silently ignore, this is a nice-to-have.
+  }
+};
 
 function App() {
   const [textures, setTextures] = useState({
@@ -34,7 +109,6 @@ function App() {
   const [aspectRatio, setAspectRatio] = useState('free'); // 'free', '1:1', '16:9', '4:3', '9:16', '21:9'
   const [recording, setRecording] = useState({
     isRecording: false,
-    isPaused: false,
     duration: 0,
     transparentBg: false,
     frameRate: 60,
@@ -48,43 +122,21 @@ function App() {
   const canvasStreamRef = useRef(null);
   const rendererRef = useRef(null);
   const secondRendererRef = useRef(null);
-  const cameraStateRef = useRef(null); // Store camera state for syncing
+  // Shared camera state for dual-view sync; CameraSync fills in position/quaternion lazily.
+  const cameraStateRef = useRef({ position: null, quaternion: null });
   const recordingAnimationRef = useRef(null); // Store animation frame ID for recording
 
-  const [settings, setSettings] = useState({
-    displacementScale: 0.02,
-    normalScale: 1,
-    roughness: 0.8, // Multiply factor (reduced from 1 for better visibility)
-    metalness: 0.2, // Multiply factor (reduced from 1 to show color better)
-    materialColor: '#cccccc', // Base material color when no texture is loaded
-    envIntensity: 1,
-    showEnvironment: false,
-    envMap: null,
-    envMapExt: null,
-    backgroundImage: null, // Simple PNG/JPG background
-    backgroundColor: '#1a1a1a', // Solid color background
-    backgroundType: 'none', // 'none', 'color', 'image'
-    backgroundImageMode: 'cover', // 'stretch', 'cover', 'contain'
-    backgroundOverlayMode: 'none', // 'none', 'uniform', 'gradient'
-    backgroundOverlayOpacity: 0.45,
-    backgroundOverlayColor: '#000000',
-    backgroundOverlayGradient: 'bottom', // 'top', 'bottom', 'left', 'right', 'vignette'
-    backgroundOverlaySoftness: 0.55,
-    ambientIntensity: 0.5,
-    spotIntensity: 1,
-    spotAngle: 0.2,
-    spotPenumbra: 0.8,
-    fresnelStrength: 0.5,
-    fresnelPower: 3,
-    lockCamera: false,
-    doubleSided: false,
-    showShadows: false, // Show contact shadows (disabled by default)
-    modelRotation: { x: 0, y: 0, z: 0 },
-    modelScale: 1.0, // Model scale factor (0.1 to 5.0)
-    textureRepeat: { u: 1, v: 1, uniform: 1, linked: true },
-    autoRotate: false,
-    autoRotateSpeed: 0, // radians per second (negative = counterclockwise, positive = clockwise)
-  });
+  // Transient error toast — shown for ~4s when a model/texture load fails.
+  const [errorMessage, setErrorMessage] = useState(null);
+  const errorTimerRef = useRef(null);
+  const showError = useCallback((msg) => {
+    setErrorMessage(msg);
+    if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    errorTimerRef.current = setTimeout(() => setErrorMessage(null), 4000);
+  }, []);
+  useEffect(() => () => { if (errorTimerRef.current) clearTimeout(errorTimerRef.current); }, []);
+
+  const [settings, setSettings] = useState(() => loadSavedSettings() || DEFAULT_SETTINGS);
 
   const handleTextureChange = (key, url) => {
     setTextures(prev => ({
@@ -93,15 +145,25 @@ function App() {
     }));
   };
 
-  const handleModelUpload = (modelData, fileInfo) => {
+  const handleModelUpload = useCallback((modelData, fileInfo) => {
     setCustomModel({
       data: modelData,
       file: fileInfo,
-      type: fileInfo.type,
+      type: fileInfo?.type ?? null,
     });
-    // Switch to custom geometry when model is uploaded
-    setGeometry('Custom');
-  };
+    if (fileInfo) setGeometry('Custom');
+  }, []);
+
+  const handleResetSettings = useCallback(() => {
+    setSettings(DEFAULT_SETTINGS);
+    try { localStorage.removeItem(SETTINGS_STORAGE_KEY); } catch { /* ignore */ }
+  }, []);
+
+  // Persist settings (throttled via rAF so dragging sliders doesn't write every tick).
+  useEffect(() => {
+    const id = requestAnimationFrame(() => saveSettings(settings));
+    return () => cancelAnimationFrame(id);
+  }, [settings]);
 
   const handleDownload = async () => {
     const zip = new JSZip();
@@ -297,7 +359,7 @@ function App() {
 
       // Reset
       recordedChunksRef.current = [];
-      setRecording(prev => ({ ...prev, isRecording: false, isPaused: false, duration: 0 }));
+      setRecording(prev => ({ ...prev, isRecording: false, duration: 0 }));
       if (recordingTimerRef.current) {
         clearInterval(recordingTimerRef.current);
         recordingTimerRef.current = null;
@@ -327,50 +389,14 @@ function App() {
     }
   };
 
-  const pauseRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.pause();
-      setRecording(prev => ({ ...prev, isPaused: true }));
-      if (recordingTimerRef.current) {
-        clearInterval(recordingTimerRef.current);
-        recordingTimerRef.current = null;
-      }
-      if (recordingAnimationRef.current) {
-        cancelAnimationFrame(recordingAnimationRef.current);
-        recordingAnimationRef.current = null;
-      }
-    }
-  };
-
-  const resumeRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
-      mediaRecorderRef.current.resume();
-      setRecording(prev => ({ ...prev, isPaused: false }));
-      recordingTimerRef.current = setInterval(() => {
-        setRecording(prev => ({ ...prev, duration: prev.duration + 1 }));
-      }, 1000);
-      // Note: We can't easily restart the draw frame loop here because we lost the context
-      // The recording will continue but without updating the offscreen canvas
-      // This is a limitation of the current implementation
-    }
-  };
-
   const updateRecordingSetting = (key, value) => {
     setRecording(prev => ({ ...prev, [key]: value }));
   };
 
-  // Initialize camera state ref
-  if (!cameraStateRef.current) {
-    cameraStateRef.current = {
-      position: null,
-      quaternion: null,
-    };
-  }
-
   return (
     <div className="flex w-full h-full bg-[#121212] text-white overflow-hidden">
       {/* 3D Viewport - Flex grow to take available space */}
-      <div className="flex-1 h-full relative">
+      <div className="flex-1 min-w-0 h-full relative">
         {dualViewMode ? (
           // Dual view layout
           <div className="flex w-full h-full">
@@ -389,6 +415,7 @@ function App() {
                 onCanvasReady={(gl) => {
                   rendererRef.current = gl;
                 }}
+                onError={showError}
               />
             </div>
             <div className="flex-1 h-full">
@@ -424,7 +451,14 @@ function App() {
             onCanvasReady={(gl) => {
               rendererRef.current = gl;
             }}
+            onError={showError}
           />
+        )}
+
+        {errorMessage && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 px-4 py-2 bg-red-600/90 border border-red-400/50 text-white text-sm rounded-lg shadow-lg backdrop-blur-sm">
+            {errorMessage}
+          </div>
         )}
       </div>
 
@@ -443,14 +477,13 @@ function App() {
         onDownload={handleDownload}
         onDownloadRender={handleDownloadRenderPng}
         onDownloadFull={handleDownloadFullPng}
+        onResetSettings={handleResetSettings}
         // Video recording props
         aspectRatio={aspectRatio}
         onAspectRatioChange={setAspectRatio}
         recording={recording}
         onStartRecording={startRecording}
         onStopRecording={stopRecording}
-        onPauseRecording={pauseRecording}
-        onResumeRecording={resumeRecording}
         onUpdateRecording={updateRecordingSetting}
         // Dual view props
         dualViewMode={dualViewMode}

@@ -175,6 +175,36 @@ const isEmissiveBakeMaterial = (material) => {
     return luminance < 0.15;
 };
 
+const captureMaterialSource = (material) => {
+    const m = Array.isArray(material) ? material[0] : material;
+    if (!m) return null;
+
+    return {
+        isEmissiveBake: isEmissiveBakeMaterial(m),
+        map: m.map || null,
+        emissiveMap: m.emissiveMap || null,
+        color: m.color?.clone?.() ?? new THREE.Color(0xffffff),
+        emissive: m.emissive?.clone?.() ?? new THREE.Color(0x000000),
+        normalMap: m.normalMap || null,
+        roughnessMap: m.roughnessMap || null,
+        metalnessMap: m.metalnessMap || null,
+        aoMap: m.aoMap || null,
+        alphaMap: m.alphaMap || null,
+        roughness: m.roughness ?? 0.5,
+        metalness: m.metalness ?? 0,
+        opacity: m.opacity ?? 1,
+        transparent: m.transparent ?? false,
+    };
+};
+
+const storeModelMaterialSources = (object) => {
+    object.traverse((child) => {
+        if (child.isMesh && !child.userData.materialSource) {
+            child.userData.materialSource = captureMaterialSource(child.material);
+        }
+    });
+};
+
 const createEmissiveBakeMaterial = (source, settings) => {
     const side = settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
     const tex = source.emissiveMap;
@@ -190,21 +220,91 @@ const createEmissiveBakeMaterial = (source, settings) => {
     return mat;
 };
 
-const disposeMaterial = (material) => {
+/**
+ * Per-URL texture cache. The viewer streams blob:// URLs that may be reused
+ * across many state ticks (every slider drag re-runs the effect that applies
+ * textures). Loading the same URL multiple times leaks one GPU texture each
+ * time — `loadCachedTexture` keeps a single instance per URL until evicted.
+ */
+const createTextureCache = () => {
+    const cache = new Map(); // url -> { texture, refs }
+    const loader = new THREE.TextureLoader();
+
+    const get = (url, configure) => {
+        if (!url) return Promise.resolve(null);
+        const hit = cache.get(url);
+        if (hit) {
+            hit.refs += 1;
+            if (configure) configure(hit.texture);
+            return Promise.resolve(hit.texture);
+        }
+        return new Promise((resolve, reject) => {
+            loader.load(
+                url,
+                (tex) => {
+                    cache.set(url, { texture: tex, refs: 1 });
+                    if (configure) configure(tex);
+                    resolve(tex);
+                },
+                undefined,
+                reject,
+            );
+        });
+    };
+
+    const release = (url) => {
+        if (!url) return;
+        const hit = cache.get(url);
+        if (!hit) return;
+        hit.refs -= 1;
+        if (hit.refs <= 0) {
+            hit.texture.dispose();
+            cache.delete(url);
+        }
+    };
+
+    const disposeAll = () => {
+        cache.forEach(({ texture }) => texture.dispose());
+        cache.clear();
+    };
+
+    return { get, release, disposeAll };
+};
+
+/** Detach shared textures before dispose so GLB maps survive render-mode switches */
+const disposeDisplayMaterial = (material) => {
     if (!material) return;
-    if (Array.isArray(material)) {
-        material.forEach(disposeMaterial);
-        return;
-    }
-    if (material.dispose) material.dispose();
+    const mats = Array.isArray(material) ? material : [material];
+    mats.forEach((m) => {
+        if (!m) return;
+        m.map = null;
+        m.emissiveMap = null;
+        m.normalMap = null;
+        m.roughnessMap = null;
+        m.metalnessMap = null;
+        m.aoMap = null;
+        m.alphaMap = null;
+        m.lightMap = null;
+        if (m.dispose) m.dispose();
+    });
 };
 
 // Component for loading and displaying custom 3D models
-const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoaded }) => {
+const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoaded, onError }) => {
     const [model, setModel] = useState(null);
     const [loading, setLoading] = useState(false);
     const groupRef = useRef();
     const materialRef = useRef();
+    // Per-component texture cache so we don't reload + leak GPU textures every
+    // time a slider moves. The map remembers which URL is bound to each map
+    // slot so we can release the previous one when the user swaps in another.
+    const textureCacheRef = useRef(null);
+    if (textureCacheRef.current === null) {
+        textureCacheRef.current = createTextureCache();
+    }
+    const boundUrlsRef = useRef({}); // mesh.uuid -> { map: url, normalMap: url, ... }
+
+    useEffect(() => () => textureCacheRef.current?.disposeAll(), []);
 
     useEffect(() => {
         if (!customModel?.file?.url) return;
@@ -234,6 +334,7 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                 break;
             default:
                 console.error('Unsupported model format:', fileType);
+                onError?.(`Unsupported model format: ${fileType}`);
                 setLoading(false);
                 return;
         }
@@ -267,6 +368,7 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
                 modelObject.position.sub(center); // Center the model
                 modelObject.scale.setScalar(scale); // Scale to fit
 
+                storeModelMaterialSources(modelObject);
                 setModel(modelObject);
                 setLoading(false);
                 if (onModelLoaded) onModelLoaded(modelObject);
@@ -276,6 +378,7 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
             },
             (error) => {
                 console.error('Error loading model:', error);
+                onError?.(`Failed to load ${customModel?.file?.name || 'model'}`);
                 setLoading(false);
             }
         );
@@ -286,125 +389,143 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
         if (!model) return;
 
         model.traverse((child) => {
-            if (child.isMesh) {
-                // Ensure geometry has normals
-                if (!child.geometry.attributes.normal) {
-                    child.geometry.computeVertexNormals();
-                }
+            if (!child.isMesh) return;
 
-                // Apply render mode
-                if (renderMode === 'normal') {
-                    const normalMat = new THREE.MeshNormalMaterial({
-                        side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+            if (!child.userData.materialSource) {
+                child.userData.materialSource = captureMaterialSource(child.material);
+            }
+
+            const source = child.userData.materialSource;
+            const side = settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
+            const displayMaterial = child.material;
+
+            if (!child.geometry.attributes.normal) {
+                child.geometry.computeVertexNormals();
+            }
+
+            if (renderMode === 'normal') {
+                if (displayMaterial?.type !== 'MeshNormalMaterial') {
+                    disposeDisplayMaterial(displayMaterial);
+                    child.material = new THREE.MeshNormalMaterial({
+                        side,
                         flatShading: false,
                     });
-                    child.material = normalMat;
-                } else if (renderMode === 'wireframe') {
+                } else {
+                    child.material.side = side;
+                }
+                return;
+            }
+
+            if (renderMode === 'wireframe') {
+                if (!displayMaterial?.wireframe) {
+                    disposeDisplayMaterial(displayMaterial);
                     child.material = new THREE.MeshBasicMaterial({
                         wireframe: true,
                         color: 0x00aaff,
-                        side: settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide,
+                        side,
                     });
                 } else {
-                    const oldMaterial = child.material;
-                    const side = settings.doubleSided ? THREE.DoubleSide : THREE.FrontSide;
-                    const useViewerTextures = !!(
-                        textures.map ||
-                        textures.normalMap ||
-                        textures.roughnessMap ||
-                        textures.metalnessMap ||
-                        textures.displacementMap
-                    );
-
-                    // Baked preview (e.g. Rodin base_basic_shaded): unlit display unless user uploads PBR maps
-                    if (!useViewerTextures && isEmissiveBakeMaterial(oldMaterial)) {
-                        if (!child.material.userData?.isEmissiveBake) {
-                            disposeMaterial(oldMaterial);
-                            child.material = createEmissiveBakeMaterial(oldMaterial, settings);
-                        } else {
-                            child.material.side = side;
-                        }
-                        child.material.needsUpdate = true;
-                        return;
-                    }
-
-                    // Standard PBR path
-                    if (!child.material.isMeshStandardMaterial && !child.material.isMeshPhysicalMaterial) {
-                        const baseColor = oldMaterial.color || new THREE.Color(settings.materialColor || 0xcccccc);
-
-                        const newMaterial = new THREE.MeshStandardMaterial({
-                            color: baseColor,
-                            side,
-                            map: oldMaterial.map || null,
-                            normalMap: oldMaterial.normalMap || null,
-                            roughnessMap: oldMaterial.roughnessMap || null,
-                            metalnessMap: oldMaterial.metalnessMap || null,
-                            emissiveMap: oldMaterial.emissiveMap || null,
-                            emissive: oldMaterial.emissive || new THREE.Color(0x000000),
-                            aoMap: oldMaterial.aoMap || null,
-                            alphaMap: oldMaterial.alphaMap || null,
-                            lightMap: oldMaterial.lightMap || null,
-                            opacity: oldMaterial.opacity !== undefined ? oldMaterial.opacity : 1,
-                            transparent: oldMaterial.transparent || false,
-                            roughness: oldMaterial.roughness ?? settings.roughness,
-                            metalness: oldMaterial.metalness ?? settings.metalness,
-                        });
-
-                        disposeMaterial(oldMaterial);
-                        child.material = newMaterial;
-                    } else {
-                        const hasModelBaseMap = !!child.material.map;
-                        if (!textures.map && !hasModelBaseMap && settings.materialColor) {
-                            child.material.color = new THREE.Color(settings.materialColor);
-                        }
-                    }
-
-                    const loader = new THREE.TextureLoader();
-                    if (textures.map) {
-                        loader.load(textures.map, (tex) => {
-                            tex.colorSpace = THREE.SRGBColorSpace;
-                            child.material.map = tex;
-                            child.material.needsUpdate = true;
-                        });
-                    }
-                    if (textures.normalMap && child.material.normalScale) {
-                        loader.load(textures.normalMap, (tex) => {
-                            child.material.normalMap = tex;
-                            child.material.normalScale.set(settings.normalScale, settings.normalScale);
-                            child.material.needsUpdate = true;
-                        });
-                    }
-                    if (textures.roughnessMap) {
-                        loader.load(textures.roughnessMap, (tex) => {
-                            child.material.roughnessMap = tex;
-                            child.material.needsUpdate = true;
-                        });
-                    }
-                    if (textures.metalnessMap) {
-                        loader.load(textures.metalnessMap, (tex) => {
-                            child.material.metalnessMap = tex;
-                            child.material.needsUpdate = true;
-                        });
-                    }
-                    if (textures.displacementMap && 'displacementScale' in child.material) {
-                        loader.load(textures.displacementMap, (tex) => {
-                            child.material.displacementMap = tex;
-                            child.material.displacementScale = settings.displacementScale;
-                            child.material.displacementBias = -settings.displacementScale / 2;
-                            child.material.needsUpdate = true;
-                        });
-                    }
-
-                    if ('roughness' in child.material) {
-                        child.material.roughness = settings.roughness;
-                    }
-                    if ('metalness' in child.material) {
-                        child.material.metalness = settings.metalness;
-                    }
                     child.material.side = side;
                 }
-                child.material.needsUpdate = true;
+                return;
             }
+
+            // PBR mode
+            const useViewerTextures = !!(
+                textures.map ||
+                textures.normalMap ||
+                textures.roughnessMap ||
+                textures.metalnessMap ||
+                textures.displacementMap
+            );
+
+            if (!useViewerTextures && source?.isEmissiveBake) {
+                if (!displayMaterial?.userData?.isEmissiveBake) {
+                    disposeDisplayMaterial(displayMaterial);
+                    child.material = createEmissiveBakeMaterial(source, settings);
+                } else {
+                    child.material.side = side;
+                }
+                return;
+            }
+
+            const needsStandardMaterial =
+                !displayMaterial?.isMeshStandardMaterial &&
+                !displayMaterial?.isMeshPhysicalMaterial;
+
+            if (needsStandardMaterial) {
+                disposeDisplayMaterial(displayMaterial);
+                const baseColor = source?.color || new THREE.Color(settings.materialColor || 0xcccccc);
+
+                child.material = new THREE.MeshStandardMaterial({
+                    color: baseColor,
+                    side,
+                    map: source?.map || null,
+                    normalMap: source?.normalMap || null,
+                    roughnessMap: source?.roughnessMap || null,
+                    metalnessMap: source?.metalnessMap || null,
+                    emissiveMap: source?.emissiveMap || null,
+                    emissive: source?.emissive || new THREE.Color(0x000000),
+                    aoMap: source?.aoMap || null,
+                    alphaMap: source?.alphaMap || null,
+                    opacity: source?.opacity ?? 1,
+                    transparent: source?.transparent ?? false,
+                    roughness: source?.roughness ?? settings.roughness,
+                    metalness: source?.metalness ?? settings.metalness,
+                });
+            } else {
+                const hasModelBaseMap = !!(source?.map || child.material.map);
+                if (!textures.map && !hasModelBaseMap && settings.materialColor) {
+                    child.material.color = new THREE.Color(settings.materialColor);
+                }
+            }
+
+            // Apply viewer-provided PBR textures via the cache. Track which URL
+            // is currently bound to each mesh's map slots so we can release the
+            // previous texture (and its GPU memory) when the URL changes.
+            const cache = textureCacheRef.current;
+            const bound = boundUrlsRef.current[child.uuid] || (boundUrlsRef.current[child.uuid] = {});
+            const applyMap = (slot, url, colorSpace) => {
+                if (bound[slot] === url) return;
+                if (bound[slot]) cache.release(bound[slot]);
+                bound[slot] = url || null;
+                if (!url) {
+                    child.material[slot] = null;
+                    child.material.needsUpdate = true;
+                    return;
+                }
+                cache.get(url, (tex) => {
+                    if (colorSpace) tex.colorSpace = colorSpace;
+                }).then((tex) => {
+                    child.material[slot] = tex;
+                    if (slot === 'normalMap' && child.material.normalScale) {
+                        child.material.normalScale.set(settings.normalScale, settings.normalScale);
+                    }
+                    if (slot === 'displacementMap') {
+                        child.material.displacementScale = settings.displacementScale;
+                        child.material.displacementBias = -settings.displacementScale / 2;
+                    }
+                    child.material.needsUpdate = true;
+                }).catch((err) => {
+                    console.error(`Failed to load ${slot}:`, err);
+                    onError?.(`Failed to load ${slot}`);
+                });
+            };
+
+            applyMap('map', textures.map, THREE.SRGBColorSpace);
+            if (child.material.normalScale) applyMap('normalMap', textures.normalMap);
+            applyMap('roughnessMap', textures.roughnessMap);
+            applyMap('metalnessMap', textures.metalnessMap);
+            if ('displacementScale' in child.material) applyMap('displacementMap', textures.displacementMap);
+
+            if ('roughness' in child.material) {
+                child.material.roughness = settings.roughness;
+            }
+            if ('metalness' in child.material) {
+                child.material.metalness = settings.metalness;
+            }
+            child.material.side = side;
+            child.material.needsUpdate = true;
         });
     }, [model, renderMode, textures, settings]);
 
@@ -417,7 +538,7 @@ const CustomModel = ({ customModel, settings, renderMode, textures, onModelLoade
     return <primitive object={model} ref={groupRef} />;
 };
 
-const ModelGroup = ({ geometryType, textures, settings, rotationBase, customModel, renderMode, onModelLoaded }) => {
+const ModelGroup = ({ geometryType, textures, settings, rotationBase, customModel, renderMode, onModelLoaded, onError }) => {
     const groupRef = useRef();
     const autoRotRef = useRef(0);
 
@@ -444,6 +565,7 @@ const ModelGroup = ({ geometryType, textures, settings, rotationBase, customMode
                     renderMode={renderMode}
                     textures={textures}
                     onModelLoaded={onModelLoaded}
+                    onError={onError}
                 />
             ) : (
                 <PBRMesh
@@ -746,32 +868,33 @@ const getBackgroundOverlayCss = (settings) => {
     return maps[grad] ?? maps.bottom;
 };
 
-// Camera sync component for syncing cameras between dual views
+// Sync the primary camera into a shared ref so the secondary view can copy
+// it. Uses pre-allocated Vector3/Quaternion to avoid per-frame GC pressure.
 const CameraSync = ({ cameraStateRef, isPrimaryView, syncCamera }) => {
     const { camera } = useThree();
 
+    useEffect(() => {
+        if (!cameraStateRef?.current) return;
+        if (!cameraStateRef.current.position) cameraStateRef.current.position = new THREE.Vector3();
+        if (!cameraStateRef.current.quaternion) cameraStateRef.current.quaternion = new THREE.Quaternion();
+    }, [cameraStateRef]);
+
     useFrame(() => {
+        const state = cameraStateRef?.current;
+        if (!state) return;
         if (isPrimaryView) {
-            // Primary view: update camera state
-            if (cameraStateRef && cameraStateRef.current) {
-                cameraStateRef.current.position = camera.position.clone();
-                cameraStateRef.current.quaternion = camera.quaternion.clone();
-            }
-        } else if (syncCamera && cameraStateRef && cameraStateRef.current) {
-            // Secondary view: sync from primary camera
-            if (cameraStateRef.current.position) {
-                camera.position.copy(cameraStateRef.current.position);
-            }
-            if (cameraStateRef.current.quaternion) {
-                camera.quaternion.copy(cameraStateRef.current.quaternion);
-            }
+            state.position.copy(camera.position);
+            state.quaternion.copy(camera.quaternion);
+        } else if (syncCamera) {
+            camera.position.copy(state.position);
+            camera.quaternion.copy(state.quaternion);
         }
     });
 
     return null;
 };
 
-const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMode = 'pbr', envPreset = "studio", bgColor = "#121212", settings, aspectRatio = 'free', transparentBg = false, onCanvasReady, isPrimaryView = true, cameraStateRef = null, syncCamera = false }) => {
+const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMode = 'pbr', envPreset = "studio", bgColor = "#121212", settings, aspectRatio = 'free', transparentBg = false, onCanvasReady, isPrimaryView = true, cameraStateRef = null, syncCamera = false, onError }) => {
     const rot = settings.modelRotation || { x: 0, y: 0, z: 0 };
     const rotRad = {
         x: (rot.x || 0) * Math.PI / 180,
@@ -779,15 +902,16 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
         z: (rot.z || 0) * Math.PI / 180,
     };
 
-    // Aspect ratio mapping
+    // Aspect ratio mapping (numeric so we can fit-to-container without collapsing)
     const aspectRatioMap = {
         'free': null,
-        '1:1': '1 / 1',
-        '16:9': '16 / 9',
-        '4:3': '4 / 3',
-        '9:16': '9 / 16',
-        '21:9': '21 / 9',
+        '1:1': 1,
+        '16:9': 16 / 9,
+        '4:3': 4 / 3,
+        '9:16': 9 / 16,
+        '21:9': 21 / 9,
     };
+    const ratio = aspectRatioMap[aspectRatio];
 
     // Background image CSS mode mapping
     const getBackgroundSize = () => {
@@ -809,10 +933,23 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
     const hasImageBackground =
         settings.backgroundImage && settings.backgroundType === 'image' && !transparentBg;
 
+    // Aspect-ratio fitting: cap both dimensions and let the browser pick the
+    // largest box that satisfies the ratio. We use min(100%, parentH * ratio)
+    // for width and the symmetric expression for height so neither dimension
+    // overflows the parent regardless of which is the limiting one.
+    const innerClass = ratio
+        ? 'relative max-w-full max-h-full'
+        : 'w-full h-full relative';
     const containerStyle = {
         background: transparentBg ? 'transparent' :
                    settings.backgroundType === 'color' ? settings.backgroundColor : bgColor,
-        ...(aspectRatioMap[aspectRatio] ? { aspectRatio: aspectRatioMap[aspectRatio] } : {}),
+        ...(ratio
+            ? {
+                aspectRatio: String(ratio),
+                width: `min(100%, calc(100% * ${ratio}))`,
+                height: `min(100%, calc(100% / ${ratio}))`,
+            }
+            : {}),
         ...(hasImageBackground ? {
             backgroundImage: overlayCss
                 ? `${overlayCss}, url(${settings.backgroundImage})`
@@ -826,8 +963,8 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
     };
 
     return (
-        <div className="w-full h-full flex items-center justify-center" style={outerContainerStyle}>
-            <div className="w-full relative" style={containerStyle}>
+        <div className="w-full h-full flex items-center justify-center overflow-hidden" style={outerContainerStyle}>
+            <div className={innerClass} style={containerStyle}>
                 <Canvas
                     shadows
                     dpr={1}
@@ -901,18 +1038,24 @@ const ViewerScene = ({ textures, geometryType = "Sphere", customModel, renderMod
                     rotationBase={rotRad}
                     customModel={customModel}
                     renderMode={renderMode}
+                    onError={onError}
                 />
 
                 {settings.showShadows && (
                     <ContactShadows position={[0, -1.5, 0]} opacity={0.4} scale={10} blur={2.5} far={4} />
                 )}
-                <OrbitControls
-                    makeDefault
-                    autoRotate={false}
-                    enableRotate={!settings.lockCamera && (isPrimaryView || !syncCamera)}
-                    enableZoom={!settings.lockCamera && (isPrimaryView || !syncCamera)}
-                    enablePan={!settings.lockCamera && (isPrimaryView || !syncCamera)}
-                />
+                {/* In dual-view, only the primary view drives OrbitControls;
+                    the secondary view receives camera state via CameraSync.
+                    Mounting controls on both fought the per-frame copy. */}
+                {(!syncCamera || isPrimaryView) && (
+                    <OrbitControls
+                        makeDefault
+                        autoRotate={false}
+                        enableRotate={!settings.lockCamera}
+                        enableZoom={!settings.lockCamera}
+                        enablePan={!settings.lockCamera}
+                    />
+                )}
                 </Canvas>
             </div>
         </div>
